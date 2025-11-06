@@ -1,0 +1,196 @@
+<!-- templates/moderation/dashboard.html -->
+<!DOCTYPE html>
+<html>
+  <head>
+    <meta charset="utf-8" />
+    <title>Moderation Dashboard</title>
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <style>
+      body {
+        font-family: system-ui, Arial, sans-serif;
+        margin: 24px;
+      }
+      .card {
+        border: 1px solid #ddd;
+        border-radius: 12px;
+        padding: 16px;
+        margin-bottom: 16px;
+      }
+      .row {
+        display: flex;
+        gap: 12px;
+        align-items: center;
+      }
+      input[type="text"] {
+        flex: 1;
+        padding: 10px;
+        border: 1px solid #ccc;
+        border-radius: 8px;
+      }
+      button {
+        padding: 10px 16px;
+        border: 0;
+        border-radius: 8px;
+        cursor: pointer;
+      }
+      .btn {
+        background: #111;
+        color: #fff;
+      }
+      .muted {
+        color: #666;
+        font-size: 12px;
+      }
+      table {
+        border-collapse: collapse;
+        width: 100%;
+      }
+      th,
+      td {
+        text-align: left;
+        padding: 8px 6px;
+        border-bottom: 1px solid #eee;
+        vertical-align: top;
+      }
+      .ok {
+        color: #0a7a21;
+      }
+      .warn {
+        color: #a66b00;
+      }
+      .bad {
+        color: #b10000;
+      }
+      .pill {
+        display: inline-block;
+        padding: 2px 8px;
+        border-radius: 999px;
+        font-size: 12px;
+      }
+      .pill.ok {
+        background: #e9f6ec;
+        color: #0a7a21;
+      }
+      .pill.bad {
+        background: #fdeaea;
+        color: #b10000;
+      }
+    </style>
+  </head>
+  <body>
+    <h1>Toxicity Moderation</h1>
+
+    <div class="card">
+      <div class="row">
+        <input id="text" type="text" placeholder="Type text to score…" />
+        <button class="btn" onclick="score()">Score</button>
+      </div>
+      <div id="result" class="muted" style="margin-top: 10px"></div>
+    </div>
+
+    <div class="card">
+      <h3>Batch score CSV</h3>
+      <p class="muted">
+        Upload a CSV with a <b>text</b> column. We’ll return a scored CSV.
+      </p>
+      <div class="row">
+        <input id="csvfile" type="file" accept=".csv" />
+        <button class="btn" onclick="batch()">Upload & Score</button>
+      </div>
+    </div>
+
+    <div class="card">
+      <h3>Recent</h3>
+      <table>
+        <thead>
+          <tr>
+            <th>Text</th>
+            <th>p(toxic)</th>
+            <th>Uncertainty</th>
+            <th>Pred</th>
+          </tr>
+        </thead>
+        <tbody id="history">
+          {% for r in history %}
+          <tr>
+            <td>{{ r.text }}</td>
+            <td>{{ r.p_toxic|floatformat:4 }}</td>
+            <td>{{ r.uncertainty|floatformat:4 }}</td>
+            <td>
+              {% if r.p_toxic >= 0.5 %}
+              <span class="pill bad">toxic</span>
+              {% else %}
+              <span class="pill ok">clean</span>
+              {% endif %}
+            </td>
+          </tr>
+          {% empty %}
+          <tr>
+            <td colspan="4" class="muted">No queries yet.</td>
+          </tr>
+          {% endfor %}
+        </tbody>
+      </table>
+    </div>
+
+    <script>
+      async function score() {
+        const el = document.getElementById("text");
+        const res = document.getElementById("result");
+        const payload = { text: el.value, max_len: 256 };
+        res.textContent = "Scoring…";
+        const r = await fetch("/api/moderation/score", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(payload),
+        });
+        const j = await r.json();
+        if (!r.ok) {
+          res.textContent = "Error: " + (j.error || r.statusText);
+          return;
+        }
+        const pred = j.p_toxic >= 0.5 ? "toxic" : "clean";
+        res.innerHTML = `p(toxic)=<b>${j.p_toxic.toFixed(
+          4
+        )}</b> · uncertainty=${j.uncertainty.toFixed(4)} · <span class="pill ${
+          pred === "toxic" ? "bad" : "ok"
+        }">${pred}</span>`;
+        // prepend to history
+        const row = document.createElement("tr");
+        row.innerHTML = `<td>${payload.text}</td><td>${j.p_toxic.toFixed(
+          4
+        )}</td><td>${j.uncertainty.toFixed(4)}</td><td><span class="pill ${
+          pred === "toxic" ? "bad" : "ok"
+        }">${pred}</span></td>`;
+        const hist = document.getElementById("history");
+        hist.insertBefore(row, hist.firstChild);
+      }
+
+      async function batch() {
+        const input = document.getElementById("csvfile");
+        if (!input.files.length) {
+          alert("Choose a CSV");
+          return;
+        }
+        const fd = new FormData();
+        fd.append("file", input.files[0]);
+        const r = await fetch("/api/moderation/batch", {
+          method: "POST",
+          body: fd,
+        });
+        if (!r.ok) {
+          const j = await r.json().catch(() => ({}));
+          alert("Error: " + (j.error || r.statusText));
+          return;
+        }
+        const blob = await r.blob();
+        const url = window.URL.createObjectURL(blob);
+        const a = document.createElement("a");
+        a.href = url;
+        a.download = "scored.csv";
+        a.click();
+        window.URL.revokeObjectURL(url);
+      }
+    </script>
+  </body>
+</html>

@@ -1,0 +1,57 @@
+services:
+  web:
+    container_name: web
+    gpus: all
+    build: 
+      context: .
+      dockerfile: ./Dockerfile
+    command: gunicorn main_module.wsgi:application --bind 0.0.0.0:8000 --workers 3 --reload
+    environment:
+      DJANGO_SETTINGS_MODULE: main_module.settings
+    env_file: .env
+    depends_on: [db]
+    volumes: [".:/app", "./artifacts:/artifacts"]
+    ports: ["8000:8000"]
+
+
+  # worker:
+  #   container_name: worker
+  #   build: ./backend
+  #   command: celery -A main_module worker --loglevel=INFO
+  #   env_file: .env
+  #   depends_on: [web, db, redis]
+  #   volumes: ["./backend:/app", "./artifacts:/artifacts"]
+
+
+  # beat:
+  #   container_name: beat
+  #   build: ./backend
+  #   command: celery -A main_module beat --loglevel=INFO
+  #   env_file: .env
+  #   depends_on: [worker]
+  #   volumes: ["./backend:/app", "./artifacts:/artifacts"]
+
+
+  # trainer:
+  #   container_name: trainer
+  #   build: ./trainer
+  #   command: bash -lc "python -m trainer.watchdog"
+  #   env_file: .env
+  #   depends_on: [db, redis]
+  #   volumes: ["./trainer:/trainer", "./artifacts:/artifacts"]
+
+
+  db:
+    container_name: toxdb
+    image: postgres:16
+    env_file: .env
+    volumes: ["pgdata:/var/lib/postgresql/data"]
+    ports: ["5432:5432"]
+
+
+  # redis:
+  #   image: redis:7-alpine
+  #   ports: ["6379:6379"]
+
+volumes:
+  pgdata:

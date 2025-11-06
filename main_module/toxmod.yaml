@@ -1,0 +1,8 @@
+model: roberta-base
+artifacts_dir: /artifacts
+max_length: 256
+batch_size: 16
+epochs: 1
+thresholds:
+  low: 0.30
+  high: 0.70
