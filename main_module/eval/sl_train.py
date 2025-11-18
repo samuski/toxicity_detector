@@ -18,17 +18,18 @@ from transformers import (
 
 from sklearn.metrics import (
     precision_recall_fscore_support, 
-    accuracy_score
+    accuracy_score,
+    mean_squared_error
 )
 import pandas as pd
 
 DEFAULT_TRAIN_CSV = "data/merged_data.csv"
 DEFAULT_VAL_CSV   = "data/val.csv"
 DEFAULT_MODEL     = "roberta-base"
-DEFAULT_EPOCHS    = 1
+DEFAULT_EPOCHS    = 3
 DEFAULT_BSZ       = 8
 DEFAULT_MAX_LEN   = 256
-LABEL = "label_bin"
+LABEL = "label_score"
 
 def build_ds_from_csv(train_csv: str, val_csv: str):
     read_opts = dict(
@@ -54,14 +55,14 @@ def build_ds_from_csv(train_csv: str, val_csv: str):
         )
 
         # Coerce label to 0/1
-        df[LABEL] = pd.to_numeric(df[LABEL], errors="coerce").astype("Int8")
+        df[LABEL] = pd.to_numeric(df[LABEL], errors="coerce").astype("float32")
         bad = df[LABEL].isna()
         if bad.any():
             dropped = int(bad.sum())
             df.dropna(subset=[LABEL], inplace=True)
             print(f"[{name}] dropped {dropped} rows with invalid/missing label")
 
-        df[LABEL] = df[LABEL].astype("int8")
+        df[LABEL] = df[LABEL].astype("float32")
         empty = (df["text"].str.len() == 0)
         if empty.any():
             df.drop(index=df.index[empty], inplace=True)
@@ -87,12 +88,13 @@ def build_ds_from_hf(name: str, config: str|None) -> DatasetDict:
 
 def compute_metrics(eval_pred):
     logits, labels = eval_pred
-    probs = 1/(1+np.exp(-logits[:,0]))
-    preds = (probs >= 0.5).astype(int)
-    p, r, f1, _ = precision_recall_fscore_support(labels, preds, average="binary", zero_division=0)
-    from sklearn.metrics import accuracy_score
-    acc = accuracy_score(labels, preds)
-    return {"accuracy": acc, "precision": p, "recall": r, "f1": f1}
+    preds = logits.flatten() 
+    mse = mean_squared_error(labels, preds)
+    rmse = np.sqrt(mse)
+    return {
+        "mse": mse,
+        "rmse": rmse
+    }
 
 def main():
     ap = argparse.ArgumentParser()
@@ -139,7 +141,7 @@ def main():
         "validation": ds["validation"].map(tfm, batched=True),
     })
 
-    model = AutoModelForSequenceClassification.from_pretrained(args.model, num_labels=2)
+    model = AutoModelForSequenceClassification.from_pretrained(args.model, num_labels=1)
     targs = TrainingArguments(
         output_dir=tmp_dir,
         eval_strategy="epoch",
@@ -154,8 +156,8 @@ def main():
         dataloader_pin_memory=False,
         gradient_accumulation_steps=16,
         load_best_model_at_end=True,
-        metric_for_best_model="f1",
-        greater_is_better=True,
+        metric_for_best_model="mse",
+        greater_is_better=False,
     )
     trainer = Trainer(
         model=model, 
