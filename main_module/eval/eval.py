@@ -227,10 +227,10 @@ def evaluate_one_weight(
     )
 
     logits = infer_logits(model, dl, device=device)
-    # Binary: convert to probabilities of class 1
     if logits.shape[1] == 1:
-        # raw logit for positive class
-        y_prob = sigmoid(logits.reshape(-1))
+        # Regression output: treat as score and clamp
+        y_prob = logits.reshape(-1)
+        y_prob = np.clip(y_prob, 0.0, 1.0)
     else:
         y_prob = softmax(logits, axis=1)[:, 1]
 
