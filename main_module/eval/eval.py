@@ -25,8 +25,12 @@ import matplotlib.pyplot as plt
 
 MODEL = "roberta-base"
 MODEL_DIR = os.path.join(os.environ.get("ARTIFACT_DIR", "/artifacts"), "sl", "active")
-DATA_CSV = os.getenv("DATA_CSV", "/data/val.csv")
+DATA_CSV = os.getenv("DATA_CSV", "main_module/data/val.csv")
 OUT_DIR  = os.getenv("EVAL_OUT", "/artifacts/eval")
+TEXT_COL = os.getenv("TEXT_COL", "text")
+LABEL_COL = os.getenv("LABEL_COL", "label_score")
+
+THRESHOLD = float(os.getenv("LABEL_THRESHOLD", "0.5"))
 
 # ---------- Data ----------
 class TextDataset(Dataset):
@@ -172,49 +176,46 @@ def evaluate_one_weight(
     outdir: Path,
     threshold_grid: np.ndarray,
     id_col: Optional[str] = None,
-    label_mapping: Optional[Dict[str, int]] = None,
+    label_threshold: float = 0.5,
 ):
     outdir.mkdir(parents=True, exist_ok=True)
-    # Labels → ints
-    if label_mapping is None:
-        # assume binary {'clean':0,'toxic':1} or {0,1}
-        unique = sorted(df[label_col].unique(), key=lambda x: str(x))
-        # if already ints, keep them
-        if all(isinstance(v, (int, np.integer)) for v in unique):
-            lab2id = {0: 0, 1: 1}
-        else:
-            # best-effort
-            lower = {str(v).lower(): v for v in unique}
-            lab2id = {lower.get("clean", unique[0]): 0, lower.get("toxic", unique[-1]): 1}
-            lab2id = {k: int(v) if isinstance(v, (int, np.integer)) else lab2id[k] for k, v in lab2id.items()}
-            # remap column to 0/1 robustly
-            df = df.copy()
-            df[label_col] = df[label_col].apply(lambda x: 1 if str(x).lower() == "toxic" or str(x) == "1" else 0)
-    else:
-        lab2id = label_mapping
-        df = df.copy()
-        df[label_col] = df[label_col].map(lab2id)
 
-    y_true = df[label_col].values.astype(int)
+    # Labels: float scores in [0,1] → binary 0/1 using label_threshold
+    df = df.copy()
+    scores = pd.to_numeric(df[label_col], errors="coerce")
+    bad = scores.isna()
+    if bad.any():
+        dropped = int(bad.sum())
+        df = df.loc[~bad]
+        scores = scores[~bad]
+        print(f"[eval] dropped {dropped} rows with invalid {label_col}")
+
+    y_true = (scores >= label_threshold).astype(int).values
     texts = df[text_col].astype(str).tolist()
     ids = df[id_col].tolist() if id_col and id_col in df.columns else list(range(len(df)))
 
     # Tokenizer / model
-    tokenizer = AutoTokenizer.from_pretrained(model_name_or_path, use_fast=True)
-    model = AutoModelForSequenceClassification.from_pretrained(
-        model_name_or_path,
-        num_labels=2,
-    )
-    # Load custom weights (state_dict or full .bin)
-    state = torch.load(weight_path, map_location="cpu")
-    # Support either bare state_dict or HF 'state_dict' key
-    if isinstance(state, dict) and "state_dict" in state:
-        state = state["state_dict"]
-    missing, unexpected = model.load_state_dict(state, strict=False)
-    if unexpected:
-        print(f"[WARN] Unexpected keys in state_dict: {unexpected}")
-    if missing:
-        print(f"[WARN] Missing keys in state_dict: {missing}")
+    weight_path = Path(weight_path)
+    if weight_path.is_dir():
+        # Our case: /artifacts/sl/active is a HF model directory
+        tokenizer = AutoTokenizer.from_pretrained(weight_path, use_fast=True)
+        model = AutoModelForSequenceClassification.from_pretrained(weight_path)
+    else:
+        # Fallback: older .bin/.pt checkpoints if you ever need them
+        tokenizer = AutoTokenizer.from_pretrained(model_name_or_path, use_fast=True)
+        model = AutoModelForSequenceClassification.from_pretrained(
+            model_name_or_path,
+            num_labels=1,  # single output head
+        )
+        state = torch.load(str(weight_path), map_location="cpu", weights_only=False)
+        if isinstance(state, dict) and "state_dict" in state:
+            state = state["state_dict"]
+        missing, unexpected = model.load_state_dict(state, strict=False)
+        if unexpected:
+            print(f"[WARN] Unexpected keys in state_dict: {unexpected}")
+        if missing:
+            print(f"[WARN] Missing keys in state_dict: {missing}")
+
     model.to(device)
 
     ds = TextDataset(texts, y_true)
@@ -279,8 +280,8 @@ def main():
     ap.add_argument("--model", default=MODEL, help="HF model id or local dir (e.g., roberta-base or ./roberta)")
     ap.add_argument("--weights", default=MODEL_DIR, help="Path or glob to weight files (e.g., 'weights/*.bin')")
     ap.add_argument("--data_csv", default=DATA_CSV, help="CSV file with at least columns: text,label")
-    ap.add_argument("--text_col", default="text")
-    ap.add_argument("--label_col", default="label")
+    ap.add_argument("--text_col", default=TEXT_COL)
+    ap.add_argument("--label_col", default=LABEL_COL)
     ap.add_argument("--id_col", default=None)
     ap.add_argument("--batch_size", type=int, default=32)
     ap.add_argument("--max_length", type=int, default=256)
@@ -288,6 +289,8 @@ def main():
     ap.add_argument("--thresholds", default="0.05:0.95:0.01",
                     help="start:stop:step for threshold sweep (inclusive of start, exclusive of stop)")
     ap.add_argument("--device", default="auto", choices=["auto", "cpu", "cuda"])
+    ap.add_argument("--label_threshold", type=float, default=THRESHOLD)
+
     args = ap.parse_args()
 
     # Threshold grid
@@ -332,6 +335,7 @@ def main():
             outdir=outdir,
             threshold_grid=grid,
             id_col=args.id_col,
+            label_threshold=args.label_threshold,
         )
         dt = time.time() - t0
         row05["seconds"] = dt
