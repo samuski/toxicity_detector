@@ -25,7 +25,7 @@ import matplotlib.pyplot as plt
 
 MODEL = "roberta-base"
 MODEL_DIR = os.path.join(os.environ.get("ARTIFACT_DIR", "/artifacts"), "sl", "active")
-DATA_CSV = os.getenv("DATA_CSV", "main_module/data/val.csv")
+DATA_CSV = os.getenv("DATA_CSV", "/data/val.csv")
 OUT_DIR  = os.getenv("EVAL_OUT", "/artifacts/eval")
 TEXT_COL = os.getenv("TEXT_COL", "text")
 LABEL_COL = os.getenv("LABEL_COL", "label_score")
