@@ -1,0 +1,67 @@
+# backend/app/moderation/sl_infer.py
+import os, threading, torch
+from transformers import AutoTokenizer, AutoModelForSequenceClassification
+
+_model = None
+_tokenizer = None
+_device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+_lock = threading.Lock()
+
+def reload_model():
+    """Hot-reload the currently active model from disk."""
+    global _model, _tokenizer
+    with _lock:
+        _model = None
+        _tokenizer = None
+    _load()
+    return True
+
+MODEL_DIR = os.path.join(os.environ.get("ARTIFACT_DIR", "/artifacts"), "sl", "active")
+
+def _load():
+    """Load model+tokenizer once, on first use (safe under Gunicorn workers)."""
+    global _model, _tokenizer
+    if _model is None:
+        with _lock:
+            if _model is None:
+                _tokenizer = AutoTokenizer.from_pretrained(MODEL_DIR)
+                _model = AutoModelForSequenceClassification.from_pretrained(MODEL_DIR)
+                _model.to(_device).eval()
+
+def score_text(text: str, max_len: int = 256) -> float:
+    """Return toxicity score in [0, 1] from regression head."""
+    _load()
+    with torch.no_grad():
+        t = _tokenizer(
+            text,
+            return_tensors="pt",
+            truncation=True,
+            max_length=max_len,
+        ).to(_device)
+
+        logits = _model(**t).logits          # shape [1, 1] or [1]
+        score = logits.squeeze().item()      # scalar
+
+        # Optional safety clamp, in case regression overshoots a bit
+        score = max(0.0, min(1.0, score))
+
+        return float(score)
+
+def estimate_uncertainty(p: float) -> float:
+    """Quick uncertainty proxy (use MC-Dropout later if needed)."""
+    return p * (1 - p)
+
+if __name__ == "__main__":
+    os.environ.setdefault("ARTIFACT_DIR", "/artifacts")
+    reload_model()
+    print("Interactive toxicity scoring. Type text and press Enter. Ctrl-D/Ctrl-Z to quit.")
+    while True:
+        try:
+            s = input("> ")
+        except EOFError:
+            break
+        if not s.strip():
+            continue
+        p = score_text(s)
+        u = estimate_uncertainty(p)
+        print(f"p(toxic)={p:.4f}  uncertainty={u:.4f}")
