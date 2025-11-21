@@ -1,3 +1,0 @@
-csv:
-  train: data/train.csv
-  val: data/val.csv
