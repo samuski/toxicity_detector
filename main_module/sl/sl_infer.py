@@ -29,7 +29,12 @@ def _load():
                 _model.to(_device).eval()
 
 def score_text(text: str, max_len: int = 256) -> float:
-    """Return toxicity score in [0, 1] from regression head."""
+    """
+    Return a toxicity score in [0, 1].
+
+    - If model has 2 logits (classification), use softmax and take class 1.
+    - If model has 1 logit (regression), clamp to [0,1].
+    """
     _load()
     with torch.no_grad():
         t = _tokenizer(
@@ -39,13 +44,18 @@ def score_text(text: str, max_len: int = 256) -> float:
             max_length=max_len,
         ).to(_device)
 
-        logits = _model(**t).logits          # shape [1, 1] or [1]
-        score = logits.squeeze().item()      # scalar
-
-        # Optional safety clamp, in case regression overshoots a bit
-        score = max(0.0, min(1.0, score))
-
-        return float(score)
+        logits = _model(**t).logits  # shape [1, N]
+        # logits: [batch, num_labels]
+        if logits.shape[-1] == 1:
+            # regression head
+            score = logits[0, 0]
+            score = torch.clamp(score, 0.0, 1.0)
+            return float(score.item())
+        else:
+            # 2-class head
+            probs = torch.softmax(logits, dim=-1)  # [1,2]
+            p_toxic = probs[0, 1]
+            return float(p_toxic.item())
 
 def estimate_uncertainty(p: float) -> float:
     """Quick uncertainty proxy (use MC-Dropout later if needed)."""

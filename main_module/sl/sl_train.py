@@ -28,7 +28,7 @@ DEFAULT_VAL_CSV   = "data/val.csv"
 DEFAULT_MODEL     = "roberta-base"
 DEFAULT_EPOCHS    = 3
 DEFAULT_BSZ       = 8
-DEFAULT_MAX_LEN   = 256
+DEFAULT_MAX_LEN   = 256 # Actual max is around 300 tokens but these are very few and usually toxic token appears before this limit.
 LABEL = "label_score"
 
 def build_ds_from_csv(train_csv: str, val_csv: str):
@@ -106,12 +106,18 @@ def main():
     ap.add_argument("--val_csv",   default=os.environ.get("VAL_CSV"))
     ap.add_argument("--hf_name",   default=os.environ.get("HF_NAME"))
     ap.add_argument("--hf_config", default=os.environ.get("HF_CONFIG"))
+    ap.add_argument(
+        "--tag",
+        default=os.environ.get("SL_TAG", "active"),
+        help="Subfolder under ARTIFACT_DIR/sl/ to save model (e.g. baseline, oracle, active).",
+    )
     args = ap.parse_args()
 
     art_dir = os.environ.get("ARTIFACT_DIR", "/artifacts")
-    out_dir = os.path.join(art_dir, "sl", "active")
+    out_dir = os.path.join(art_dir, "sl", args.tag)
     tmp_dir = os.path.join(art_dir, "sl", "tmp")
     Path(out_dir).mkdir(parents=True, exist_ok=True)
+    Path(tmp_dir).mkdir(parents=True, exist_ok=True)
 
     train_csv = args.train_csv or DEFAULT_TRAIN_CSV
     val_csv   = args.val_csv   or DEFAULT_VAL_CSV

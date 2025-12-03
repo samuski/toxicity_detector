@@ -1,4 +1,3 @@
-<!-- templates/moderation/dashboard.html -->
 <!DOCTYPE html>
 <html>
   <head>
@@ -9,23 +8,44 @@
       body {
         font-family: system-ui, Arial, sans-serif;
         margin: 24px;
+        background: #fff;
+        color: #111;
+      }
+      h1 { margin: 0 0 12px; }
+      .grid {
+        display: grid;
+        grid-template-columns: 1fr;
+        gap: 16px;
+        max-width: 1100px;
+      }
+      @media (min-width: 980px) {
+        .grid {
+          grid-template-columns: 1.1fr 0.9fr;
+          align-items: start;
+        }
       }
       .card {
         border: 1px solid #ddd;
         border-radius: 12px;
         padding: 16px;
-        margin-bottom: 16px;
+        background: #fff;
       }
       .row {
         display: flex;
         gap: 12px;
         align-items: center;
+        flex-wrap: wrap;
       }
       input[type="text"] {
         flex: 1;
+        min-width: 260px;
         padding: 10px;
         border: 1px solid #ccc;
         border-radius: 8px;
+      }
+      input[type="file"] {
+        flex: 1;
+        min-width: 260px;
       }
       button {
         padding: 10px 16px;
@@ -33,33 +53,17 @@
         border-radius: 8px;
         cursor: pointer;
       }
+      button:disabled { opacity: 0.6; cursor: not-allowed; }
       .btn {
         background: #111;
         color: #fff;
       }
+      .btn-allow { background: #0a7a21; color: #fff; }
+      .btn-block { background: #b10000; color: #fff; }
+      .btn-soft { background: #eee; color: #111; }
       .muted {
         color: #666;
         font-size: 12px;
-      }
-      table {
-        border-collapse: collapse;
-        width: 100%;
-      }
-      th,
-      td {
-        text-align: left;
-        padding: 8px 6px;
-        border-bottom: 1px solid #eee;
-        vertical-align: top;
-      }
-      .ok {
-        color: #0a7a21;
-      }
-      .warn {
-        color: #a66b00;
-      }
-      .bad {
-        color: #b10000;
       }
       .pill {
         display: inline-block;
@@ -67,105 +71,213 @@
         border-radius: 999px;
         font-size: 12px;
       }
-      .pill.ok {
-        background: #e9f6ec;
-        color: #0a7a21;
+      .pill.ok { background: #e9f6ec; color: #0a7a21; }
+      .pill.bad { background: #fdeaea; color: #b10000; }
+      code {
+        font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas,
+          "Liberation Mono", "Courier New", monospace;
+        font-size: 12px;
+        background: #f5f5f5;
+        padding: 1px 4px;
+        border-radius: 4px;
       }
-      .pill.bad {
-        background: #fdeaea;
-        color: #b10000;
+      table { border-collapse: collapse; width: 100%; }
+      th, td {
+        text-align: left;
+        padding: 8px 6px;
+        border-bottom: 1px solid #eee;
+        vertical-align: top;
+        word-break: break-word;
       }
+      .section-title {
+        margin: 0 0 8px;
+        font-size: 16px;
+      }
+      .spacer { height: 8px; }
+
+      /* IL text display */
+      .il-box {
+        border: 1px solid #eee;
+        background: #fafafa;
+        border-radius: 10px;
+        padding: 12px;
+        white-space: pre-wrap;
+        line-height: 1.35;
+        min-height: 84px;
+      }
+
+      .kpi {
+        display: flex;
+        gap: 12px;
+        flex-wrap: wrap;
+        margin-top: 8px;
+      }
+      .kpi > div {
+        border: 1px solid #eee;
+        border-radius: 10px;
+        padding: 8px 10px;
+        background: #fafafa;
+        font-size: 12px;
+      }
+      .kpi b { font-size: 14px; }
     </style>
   </head>
   <body>
     <h1>Toxicity Moderation</h1>
+    <p class="muted">
+      SL scoring + simple human labeling loop (IL). Oldest-first for labeling.
+    </p>
 
-    <div class="card">
-      <div class="row">
-        <input id="text" type="text" placeholder="Type text to score…" />
-        <button class="btn" onclick="score()">Score</button>
+    <div class="grid">
+
+      <!-- LEFT COLUMN -->
+      <div>
+
+        <!-- Single-text scoring (SL) -->
+        <div class="card">
+          <h3 class="section-title">Score a single text (SL)</h3>
+          <div class="row">
+            <input id="text" type="text" placeholder="Type text to score…" />
+            <button class="btn" onclick="score()">Score</button>
+          </div>
+          <div id="result" class="muted" style="margin-top: 10px"></div>
+        </div>
+
+        <!-- Batch scoring CSV -->
+        <div class="card">
+          <h3 class="section-title">Batch score CSV (SL)</h3>
+          <p class="muted">
+            Upload a CSV with a <b>text</b> column. Returns <code>scored.csv</code>
+            with p(toxic) + uncertainty.
+          </p>
+          <div class="row">
+            <input id="csvfile" type="file" accept=".csv" />
+            <button class="btn" onclick="batch()">Upload &amp; Score</button>
+          </div>
+        </div>
+
+        <!-- Human labeling (IL) -->
+        <div class="card">
+          <h3 class="section-title">Human labeling (IL)</h3>
+          <p class="muted" style="margin-top: -4px;">
+            Oldest UNCERTAIN item first.
+            Remaining: <b id="il_remaining">-</b>
+          </p>
+
+          <div id="il_text" class="il-box">Loading…</div>
+
+          <div class="kpi">
+            <div>p(toxic)<br/><b id="il_score">-</b></div>
+            <div>uncertainty<br/><b id="il_unc">-</b></div>
+            <div>source<br/><b id="il_source">-</b></div>
+            <div>id<br/><b id="il_id">-</b></div>
+          </div>
+
+          <div class="spacer"></div>
+
+          <div class="row">
+            <button class="btn-allow" onclick="ilDecide('ALLOW')">Allow (A)</button>
+            <button class="btn-block" onclick="ilDecide('BLOCK')">Block (B)</button>
+            <button class="btn-soft" onclick="ilNext()">Skip (S)</button>
+          </div>
+
+          <div id="il_status" class="muted" style="margin-top: 10px;"></div>
+        </div>
+
       </div>
-      <div id="result" class="muted" style="margin-top: 10px"></div>
-    </div>
 
-    <div class="card">
-      <h3>Batch score CSV</h3>
-      <p class="muted">
-        Upload a CSV with a <b>text</b> column. We’ll return a scored CSV.
-      </p>
-      <div class="row">
-        <input id="csvfile" type="file" accept=".csv" />
-        <button class="btn" onclick="batch()">Upload & Score</button>
+      <!-- RIGHT COLUMN -->
+      <div>
+
+        <!-- Recent SL queries -->
+        <div class="card">
+          <h3 class="section-title">Recent (this server process)</h3>
+          <p class="muted" style="margin-top:-4px;">
+            This list is your in-memory ring buffer (resets when server restarts).
+          </p>
+          <table>
+            <thead>
+              <tr>
+                <th>Text</th>
+                <th>p(toxic)</th>
+                <th>Uncertainty</th>
+                <th>Pred</th>
+              </tr>
+            </thead>
+            <tbody id="history">
+              {% for r in history %}
+              <tr>
+                <td>{{ r.text }}</td>
+                <td>{{ r.p_toxic|floatformat:4 }}</td>
+                <td>{{ r.uncertainty|floatformat:4 }}</td>
+                <td>
+                  {% if r.p_toxic >= 0.5 %}
+                  <span class="pill bad">toxic</span>
+                  {% else %}
+                  <span class="pill ok">clean</span>
+                  {% endif %}
+                </td>
+              </tr>
+              {% empty %}
+              <tr>
+                <td colspan="4" class="muted">No queries yet.</td>
+              </tr>
+              {% endfor %}
+            </tbody>
+          </table>
+
+          <p class="muted" style="margin-top:10px;">
+            Tip: Keyboard shortcuts in labeling: <code>A</code>=allow, <code>B</code>=block, <code>S</code>=skip.
+          </p>
+        </div>
+
       </div>
-    </div>
-
-    <div class="card">
-      <h3>Recent</h3>
-      <table>
-        <thead>
-          <tr>
-            <th>Text</th>
-            <th>p(toxic)</th>
-            <th>Uncertainty</th>
-            <th>Pred</th>
-          </tr>
-        </thead>
-        <tbody id="history">
-          {% for r in history %}
-          <tr>
-            <td>{{ r.text }}</td>
-            <td>{{ r.p_toxic|floatformat:4 }}</td>
-            <td>{{ r.uncertainty|floatformat:4 }}</td>
-            <td>
-              {% if r.p_toxic >= 0.5 %}
-              <span class="pill bad">toxic</span>
-              {% else %}
-              <span class="pill ok">clean</span>
-              {% endif %}
-            </td>
-          </tr>
-          {% empty %}
-          <tr>
-            <td colspan="4" class="muted">No queries yet.</td>
-          </tr>
-          {% endfor %}
-        </tbody>
-      </table>
     </div>
 
     <script>
+      // ---------- SL single scoring ----------
       async function score() {
         const el = document.getElementById("text");
         const res = document.getElementById("result");
         const payload = { text: el.value, max_len: 256 };
+        if (!payload.text.trim()) {
+          res.textContent = "Enter some text first.";
+          return;
+        }
         res.textContent = "Scoring…";
-        const r = await fetch("/api/moderation/score", {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify(payload),
-        });
-        const j = await r.json();
+
+        let r, j;
+        try {
+          r = await fetch("/api/moderation/score", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify(payload),
+          });
+          j = await r.json();
+        } catch (err) {
+          res.textContent = "Network or parse error: " + err;
+          return;
+        }
         if (!r.ok) {
           res.textContent = "Error: " + (j.error || r.statusText);
           return;
         }
+
         const pred = j.p_toxic >= 0.5 ? "toxic" : "clean";
-        res.innerHTML = `p(toxic)=<b>${j.p_toxic.toFixed(
-          4
-        )}</b> · uncertainty=${j.uncertainty.toFixed(4)} · <span class="pill ${
-          pred === "toxic" ? "bad" : "ok"
-        }">${pred}</span>`;
-        // prepend to history
+        res.innerHTML = `p(toxic)=<b>${j.p_toxic.toFixed(4)}</b> · uncertainty=${j.uncertainty.toFixed(4)} ·
+          <span class="pill ${pred === "toxic" ? "bad" : "ok"}">${pred}</span>`;
+
+        // prepend to history table (client-side only)
         const row = document.createElement("tr");
-        row.innerHTML = `<td>${payload.text}</td><td>${j.p_toxic.toFixed(
-          4
-        )}</td><td>${j.uncertainty.toFixed(4)}</td><td><span class="pill ${
-          pred === "toxic" ? "bad" : "ok"
-        }">${pred}</span></td>`;
+        row.innerHTML = `<td>${escapeHtml(payload.text)}</td>
+          <td>${j.p_toxic.toFixed(4)}</td>
+          <td>${j.uncertainty.toFixed(4)}</td>
+          <td><span class="pill ${pred === "toxic" ? "bad" : "ok"}">${pred}</span></td>`;
         const hist = document.getElementById("history");
         hist.insertBefore(row, hist.firstChild);
       }
 
+      // ---------- SL batch scoring ----------
       async function batch() {
         const input = document.getElementById("csvfile");
         if (!input.files.length) {
@@ -174,10 +286,14 @@
         }
         const fd = new FormData();
         fd.append("file", input.files[0]);
-        const r = await fetch("/api/moderation/batch", {
-          method: "POST",
-          body: fd,
-        });
+
+        let r;
+        try {
+          r = await fetch("/api/moderation/batch", { method: "POST", body: fd });
+        } catch (err) {
+          alert("Network error: " + err);
+          return;
+        }
         if (!r.ok) {
           const j = await r.json().catch(() => ({}));
           alert("Error: " + (j.error || r.statusText));
@@ -191,6 +307,110 @@
         a.click();
         window.URL.revokeObjectURL(url);
       }
+
+      // ---------- IL labeling ----------
+      let currentIlItemId = null;
+
+      async function ilNext() {
+        setIlStatus("Loading next item…");
+        let r, j;
+        try {
+          r = await fetch("/api/moderation/il/next");
+          j = await r.json();
+        } catch (e) {
+          setIlStatus("Network error: " + e);
+          return;
+        }
+
+        document.getElementById("il_remaining").textContent = (j.remaining ?? "-");
+
+        if (!j.item) {
+          currentIlItemId = null;
+          document.getElementById("il_text").textContent = "No items left 🎉";
+          fillIlMeta(null);
+          setIlStatus("");
+          return;
+        }
+
+        currentIlItemId = j.item.id;
+        document.getElementById("il_text").textContent = j.item.text;
+        fillIlMeta(j.item);
+        setIlStatus("");
+      }
+
+      async function ilDecide(action) {
+        if (!currentIlItemId) {
+          alert("No item loaded.");
+          return;
+        }
+
+        setIlStatus("Saving decision…");
+
+        let r, j;
+        try {
+          r = await fetch("/api/moderation/il/decide", {
+            method: "POST",
+            headers: {"Content-Type":"application/json"},
+            body: JSON.stringify({ item_id: currentIlItemId, action }),
+          });
+          j = await r.json().catch(() => ({}));
+        } catch (e) {
+          setIlStatus("");
+          alert("Network error: " + e);
+          return;
+        }
+
+        if (!r.ok) {
+          setIlStatus("");
+          alert("Error: " + (j.error || r.statusText));
+          return;
+        }
+
+        await ilNext();
+      }
+
+      function fillIlMeta(item) {
+        const set = (id, v) => document.getElementById(id).textContent = v;
+
+        if (!item) {
+          set("il_score", "-");
+          set("il_unc", "-");
+          set("il_source", "-");
+          set("il_id", "-");
+          return;
+        }
+
+        set("il_score", (item.sl_score != null ? Number(item.sl_score).toFixed(4) : "-"));
+        set("il_unc", (item.sl_uncertainty != null ? Number(item.sl_uncertainty).toFixed(4) : "-"));
+        set("il_source", item.source || "-");
+        set("il_id", String(item.id));
+      }
+
+      function setIlStatus(msg) {
+        document.getElementById("il_status").textContent = msg;
+      }
+
+      // keyboard shortcuts: A allow, B block, S skip
+      window.addEventListener("keydown", (e) => {
+        if (e.target && (e.target.tagName === "INPUT" || e.target.tagName === "TEXTAREA")) return;
+        const k = (e.key || "").toLowerCase();
+        if (k === "a") ilDecide("ALLOW");
+        if (k === "b") ilDecide("BLOCK");
+        if (k === "s") ilNext();
+      });
+
+      // small safety for history prepend
+      function escapeHtml(s) {
+        return String(s)
+          .replaceAll("&", "&amp;")
+          .replaceAll("<", "&lt;")
+          .replaceAll(">", "&gt;")
+          .replaceAll('"', "&quot;")
+          .replaceAll("'", "&#039;");
+      }
+
+      // auto-load IL item on page load
+      window.addEventListener("load", ilNext);
     </script>
   </body>
 </html>

@@ -32,7 +32,7 @@ TEXT_COL = os.getenv("TEXT_COL", "text")
 LABEL_COL = os.getenv("LABEL_COL", "label_score")
 
 # This is ONLY for binarizing label_score -> y_true, and for the manual eval row.
-LABEL_THRESHOLD_DEFAULT = float(os.getenv("LABEL_THRESHOLD", "0.5"))
+LABEL_THRESHOLD_DEFAULT = float(os.getenv("LABEL_THRESHOLD", "0.7"))
 
 
 # ---------------- Data ----------------
