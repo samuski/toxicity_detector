@@ -32,7 +32,7 @@ TEXT_COL = os.getenv("TEXT_COL", "text")
 LABEL_COL = os.getenv("LABEL_COL", "label_score")
 
 # This is ONLY for binarizing label_score -> y_true, and for the manual eval row.
-LABEL_THRESHOLD_DEFAULT = float(os.getenv("LABEL_THRESHOLD", "0.7"))
+LABEL_THRESHOLD_DEFAULT = float(os.getenv("LABEL_THRESHOLD", "0.5"))
 
 
 # ---------------- Data ----------------
@@ -109,7 +109,7 @@ def compute_binary_metrics(y_true, y_prob, threshold: float):
         except Exception:
             pass
         try:
-            prauc = average_precision_score(y_true, y_prob)
+            prauc = average_precision_score(y_true, y_prob) 
         except Exception:
             pass
 
@@ -235,9 +235,9 @@ def evaluate_one_weight(
 
     logits = infer_logits(model, dl, device=device)
     if logits.shape[1] == 1:
-        # regression output: treat as score and clamp
-        y_prob = logits.reshape(-1)
-        y_prob = np.clip(y_prob, 0.0, 1.0)
+        # binary logits -> probability
+        z = logits.reshape(-1)
+        y_prob = 1.0 / (1.0 + np.exp(-z))   # sigmoid
     else:
         y_prob = softmax(logits, axis=1)[:, 1]
 

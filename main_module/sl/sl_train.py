@@ -1,100 +1,138 @@
 # main_module/eval/train_sl.py
 import os, argparse, numpy as np
-import torch
 from pathlib import Path
-from datasets import (
-    load_dataset, 
-    Dataset, 
-    DatasetDict,
-    Value
-)
-from transformers import (
-    AutoTokenizer, 
-    AutoModelForSequenceClassification, 
-    TrainingArguments, 
-    Trainer, 
-    DataCollatorWithPadding
-)
 
-from sklearn.metrics import (
-    precision_recall_fscore_support, 
-    accuracy_score,
-    mean_squared_error
-)
 import pandas as pd
+import torch
+import torch.nn.functional as F
+
+from datasets import load_dataset, Dataset, DatasetDict
+from transformers import (
+    AutoTokenizer,
+    AutoModelForSequenceClassification,
+    TrainingArguments,
+    Trainer,
+    DataCollatorWithPadding,
+)
+from sklearn.metrics import precision_recall_fscore_support, accuracy_score
+
 
 DEFAULT_TRAIN_CSV = "data/train.csv"
 DEFAULT_VAL_CSV   = "data/val.csv"
 DEFAULT_MODEL     = "roberta-base"
 DEFAULT_EPOCHS    = 3
 DEFAULT_BSZ       = 8
-DEFAULT_MAX_LEN   = 256 # Actual max is around 300 tokens but these are very few and usually toxic token appears before this limit.
-LABEL = "label_score"
+DEFAULT_MAX_LEN   = 256
 
-def build_ds_from_csv(train_csv: str, val_csv: str):
-    read_opts = dict(
-        low_memory=False,          # no chunked guessing
-        keep_default_na=False,     # keep literal "NA" as text
-        dtype={LABEL: "object"},    # read label as object then force type later
+LABEL_BIN = "label_bin"
+
+
+def _clean_df(df: pd.DataFrame, name: str, label_col: str, threshold: float) -> pd.DataFrame:
+    if "text" not in df.columns or label_col not in df.columns:
+        raise ValueError(f"{name}.csv must have columns: text,{label_col}")
+
+    df = df.copy()
+    df["text"] = df["text"].astype("string").fillna("")
+    df["text"] = (
+        df["text"].str.normalize("NFKC")
+                  .str.replace(r"\s+", " ", regex=True)
+                  .str.strip()
     )
+
+    y = pd.to_numeric(df[label_col], errors="coerce")
+    bad = y.isna()
+    if bad.any():
+        df = df.loc[~bad].copy()
+        y = y[~bad]
+        print(f"[{name}] dropped {int(bad.sum())} rows with invalid/missing label")
+
+    # Works for both float scores and already-binary 0/1 labels.
+    df[LABEL_BIN] = (y.astype("float32") >= float(threshold)).astype("int64")
+
+    empty = (df["text"].str.len() == 0)
+    if empty.any():
+        df = df.loc[~empty].copy()
+        print(f"[{name}] dropped {int(empty.sum())} empty-text rows")
+
+    return df.reset_index(drop=True)
+
+
+def build_ds_from_csv(train_csv: str, val_csv: str, label_col: str, threshold: float, augment_csv: str | None) -> DatasetDict:
+    read_opts = dict(low_memory=False, keep_default_na=False, dtype={label_col: "object"})
+
     df_tr = pd.read_csv(train_csv, **read_opts)
     df_va = pd.read_csv(val_csv,   **read_opts)
 
-    # Ensure required columns exist
-    for df, name in [(df_tr, "train"), (df_va, "val")]:
-        if "text" not in df or LABEL not in df:
-            raise ValueError(f"{name}.csv must have columns: text,label_bin")
+    df_tr = _clean_df(df_tr, "train", label_col, threshold)
+    df_va = _clean_df(df_va, "val",   label_col, threshold)
 
-        # Force string text; fill blanks
-        df["text"] = df["text"].astype("string").fillna("")
+    if augment_csv:
+        df_aug = pd.read_csv(augment_csv, **read_opts)
+        df_aug = _clean_df(df_aug, "augment", label_col, threshold)
+        df_tr = pd.concat([df_tr, df_aug], ignore_index=True)
+        print(f"[train] appended augment rows: +{len(df_aug)} (total train={len(df_tr)})")
 
-        df["text"] = (
-            df["text"].str.normalize("NFKC")
-                      .str.replace(r"\s+", " ", regex=True)
-                      .str.strip()
-        )
-
-        # Coerce label to 0/1
-        df[LABEL] = pd.to_numeric(df[LABEL], errors="coerce").astype("float32")
-        bad = df[LABEL].isna()
-        if bad.any():
-            dropped = int(bad.sum())
-            df.dropna(subset=[LABEL], inplace=True)
-            print(f"[{name}] dropped {dropped} rows with invalid/missing label")
-
-        df[LABEL] = df[LABEL].astype("float32")
-        empty = (df["text"].str.len() == 0)
-        if empty.any():
-            df.drop(index=df.index[empty], inplace=True)
-            print(f"[{name}] dropped {int(empty.sum())} empty-text rows")
-
-    from datasets import Dataset, DatasetDict
     return DatasetDict({
-        "train": Dataset.from_pandas(df_tr.reset_index(drop=True), preserve_index=False),
-        "validation": Dataset.from_pandas(df_va.reset_index(drop=True), preserve_index=False),
+        "train": Dataset.from_pandas(df_tr, preserve_index=False),
+        "validation": Dataset.from_pandas(df_va, preserve_index=False),
     })
 
-def build_ds_from_hf(name: str, config: str|None) -> DatasetDict:
+
+def build_ds_from_hf(name: str, config: str | None, label_col: str, threshold: float) -> DatasetDict:
     raw = load_dataset(name, config) if config else load_dataset(name)
+
     text_key = "text" if "text" in raw["train"].features else (
         "comment_text" if "comment_text" in raw["train"].features else None
     )
-    if text_key is None or LABEL not in raw["train"].features:
-        raise ValueError("Dataset must expose 'text' (or 'comment_text') and binary 'label'.")
+    if text_key is None or label_col not in raw["train"].features:
+        raise ValueError(f"HF dataset must expose '{text_key}' and '{label_col}'.")
+
+    def to_bin(example):
+        y = float(example[label_col])
+        example[LABEL_BIN] = 1 if y >= float(threshold) else 0
+        return example
+
     def rename(split):
-        return raw[split].rename_columns({text_key: "text"})
-    val_split = "validation" if "validation" in raw else "test"
+        ds = raw[split].rename_columns({text_key: "text"})
+        ds = ds.map(to_bin)
+        return ds
+
+    val_split = "validation" if "validation" in raw else ("test" if "test" in raw else "train")
     return DatasetDict({"train": rename("train"), "validation": rename(val_split)})
+
 
 def compute_metrics(eval_pred):
     logits, labels = eval_pred
-    preds = logits.flatten() 
-    mse = mean_squared_error(labels, preds)
-    rmse = np.sqrt(mse)
+    logits = np.asarray(logits).squeeze(-1)
+    labels = np.asarray(labels).astype(int)
+
+    probs = 1.0 / (1.0 + np.exp(-logits))
+    preds = (probs >= 0.5).astype(int)
+
+    acc = accuracy_score(labels, preds)
+    prec, rec, f1, _ = precision_recall_fscore_support(labels, preds, average="binary", zero_division=0)
+
     return {
-        "mse": mse,
-        "rmse": rmse
+        "accuracy": float(acc),
+        "precision_toxic": float(prec),
+        "recall_toxic": float(rec),
+        "f1_toxic": float(f1),
     }
+
+
+class WeightedBCETrainer(Trainer):
+    def __init__(self, *args, pos_weight: float, **kwargs):
+        super().__init__(*args, **kwargs)
+        self._pos_weight = float(pos_weight)
+
+    def compute_loss(self, model, inputs, return_outputs=False):
+        labels = inputs.pop("labels").float()               # [B]
+        outputs = model(**inputs)
+        logits = outputs.logits.squeeze(-1)                 # [B]
+        pw = torch.tensor([self._pos_weight], device=logits.device, dtype=torch.float32)
+        loss = F.binary_cross_entropy_with_logits(logits, labels, pos_weight=pw)
+        return (loss, outputs) if return_outputs else loss
+
 
 def main():
     ap = argparse.ArgumentParser()
@@ -102,15 +140,21 @@ def main():
     ap.add_argument("--epochs", type=int, default=int(os.environ.get("SL_EPOCHS", DEFAULT_EPOCHS)))
     ap.add_argument("--bsz", type=int, default=int(os.environ.get("SL_BSZ", DEFAULT_BSZ)))
     ap.add_argument("--max_len", type=int, default=int(os.environ.get("SL_MAX_LEN", DEFAULT_MAX_LEN)))
+
     ap.add_argument("--train_csv", default=os.environ.get("TRAIN_CSV"))
     ap.add_argument("--val_csv",   default=os.environ.get("VAL_CSV"))
+    ap.add_argument("--augment_csv", default=os.environ.get("AUGMENT_CSV"))
+
     ap.add_argument("--hf_name",   default=os.environ.get("HF_NAME"))
     ap.add_argument("--hf_config", default=os.environ.get("HF_CONFIG"))
-    ap.add_argument(
-        "--tag",
-        default=os.environ.get("SL_TAG", "active"),
-        help="Subfolder under ARTIFACT_DIR/sl/ to save model (e.g. baseline, oracle, active).",
-    )
+
+    ap.add_argument("--tag", default=os.environ.get("SL_TAG", "active"))
+
+    ap.add_argument("--label_col", default=os.environ.get("LABEL_COL", "label_score"))
+    ap.add_argument("--label_threshold", type=float, default=float(os.environ.get("LABEL_TH", 0.5)))
+    ap.add_argument("--pos_weight", default=os.environ.get("POS_WEIGHT", "auto"),
+                    help="Use 'auto' or a float (e.g., 6.0).")
+
     args = ap.parse_args()
 
     art_dir = os.environ.get("ARTIFACT_DIR", "/artifacts")
@@ -123,31 +167,42 @@ def main():
     val_csv   = args.val_csv   or DEFAULT_VAL_CSV
 
     if os.path.exists(train_csv) and os.path.exists(val_csv):
-        ds = build_ds_from_csv(train_csv, val_csv)
-        print(f"Using local CSVs: {train_csv} / {val_csv}")
+        ds = build_ds_from_csv(train_csv, val_csv, args.label_col, args.label_threshold, args.augment_csv)
+        print(f"Using local CSVs: {train_csv} / {val_csv}" + (f" + {args.augment_csv}" if args.augment_csv else ""))
     elif args.hf_name:
-        ds = build_ds_from_hf(args.hf_name, args.hf_config)
+        ds = build_ds_from_hf(args.hf_name, args.hf_config, args.label_col, args.label_threshold)
         print(f"Using HF dataset: {args.hf_name} ({args.hf_config or 'default'})")
     else:
         raise SystemExit(
-            "Provide CSVs (create data/train.csv, data/val.csv) or set HF_NAME. "
-            "Current defaults not found:\n"
-            f"  {train_csv}\n  {val_csv}"
+            "Provide CSVs (TRAIN_CSV/VAL_CSV) or HF_NAME.\n"
+            f"Missing defaults:\n  {train_csv}\n  {val_csv}"
         )
 
-    tok = AutoTokenizer.from_pretrained(args.model) # tokenizer is BPE-based
-    data_collator = DataCollatorWithPadding(tokenizer=tok)  # pads per-batch to max length
+    # Class balance -> pos_weight
+    y_train = np.array(ds["train"][LABEL_BIN], dtype=np.int64)
+    pos = int((y_train == 1).sum())
+    neg = int((y_train == 0).sum())
+    if pos == 0:
+        raise SystemExit("No positive (toxic) samples in training data.")
+
+    pos_weight = (neg / max(pos, 1)) if args.pos_weight == "auto" else float(args.pos_weight)
+    print(f"[class balance] neg={neg} pos={pos} pos_weight={pos_weight:.4f}")
+
+    tok = AutoTokenizer.from_pretrained(args.model)
+    data_collator = DataCollatorWithPadding(tokenizer=tok)
 
     def tfm(batch):
         t = tok(batch["text"], truncation=True, max_length=args.max_len)
-        t["labels"] = batch[LABEL]
+        t["labels"] = [float(x) for x in batch[LABEL_BIN]]
         return t
+
     ds = DatasetDict({
         "train": ds["train"].map(tfm, batched=True),
         "validation": ds["validation"].map(tfm, batched=True),
     })
 
     model = AutoModelForSequenceClassification.from_pretrained(args.model, num_labels=1)
+
     targs = TrainingArguments(
         output_dir=tmp_dir,
         eval_strategy="epoch",
@@ -162,21 +217,25 @@ def main():
         dataloader_pin_memory=False,
         gradient_accumulation_steps=16,
         load_best_model_at_end=True,
-        metric_for_best_model="mse",
-        greater_is_better=False,
+        metric_for_best_model="f1_toxic",
+        greater_is_better=True,
     )
-    trainer = Trainer(
-        model=model, 
-        args=targs, 
+
+    trainer = WeightedBCETrainer(
+        model=model,
+        args=targs,
         train_dataset=ds["train"],
         eval_dataset=ds["validation"],
         data_collator=data_collator,
-        compute_metrics=compute_metrics
+        compute_metrics=compute_metrics,
+        pos_weight=pos_weight,
     )
+
     trainer.train()
     trainer.model.save_pretrained(out_dir)
     tok.save_pretrained(out_dir)
     print(f"Saved SL model to {out_dir}")
+
 
 if __name__ == "__main__":
     main()
