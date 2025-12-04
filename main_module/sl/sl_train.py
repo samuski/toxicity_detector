@@ -125,14 +125,15 @@ class WeightedBCETrainer(Trainer):
         super().__init__(*args, **kwargs)
         self._pos_weight = float(pos_weight)
 
-    def compute_loss(self, model, inputs, return_outputs=False):
-        labels = inputs.pop("labels").float()               # [B]
+    def compute_loss(self, model, inputs, return_outputs=False, **kwargs):
+        labels = inputs.pop("labels").float()      # [B]
         outputs = model(**inputs)
-        logits = outputs.logits.squeeze(-1)                 # [B]
+        logits = outputs.logits.squeeze(-1)        # [B]
         pw = torch.tensor([self._pos_weight], device=logits.device, dtype=torch.float32)
-        loss = F.binary_cross_entropy_with_logits(logits, labels, pos_weight=pw)
+        loss = torch.nn.functional.binary_cross_entropy_with_logits(
+            logits, labels, pos_weight=pw
+        )
         return (loss, outputs) if return_outputs else loss
-
 
 def main():
     ap = argparse.ArgumentParser()

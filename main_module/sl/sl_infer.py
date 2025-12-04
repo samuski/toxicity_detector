@@ -7,16 +7,14 @@ _tokenizer = None
 _device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 _lock = threading.Lock()
 
-def reload_model():
-    """Hot-reload the currently active model from disk."""
-    global _model, _tokenizer
-    with _lock:
-        _model = None
-        _tokenizer = None
-    _load()
-    return True
+MODEL_DIR = os.environ.get("SL_MODEL_DIR", "/artifacts/sl/active")
 
-MODEL_DIR = os.path.join(os.environ.get("ARTIFACT_DIR", "/artifacts"), "sl", "active")
+def reload_model():
+    global _tok, _model
+    if not os.path.isdir(MODEL_DIR):
+        print(f"[SL] model dir missing: {MODEL_DIR} (SL disabled until trained)")
+        _tok, _model = None, None
+        return
 
 def _load():
     """Load model+tokenizer once, on first use (safe under Gunicorn workers)."""
@@ -36,6 +34,9 @@ def score_text(text: str, max_len: int = 256) -> float:
     - If model has 1 logit (regression), clamp to [0,1].
     """
     _load()
+    if _model is None:
+        raise RuntimeError("SL model not available yet. Train it or mount /artifacts/sl/active.")
+
     with torch.no_grad():
         t = _tokenizer(
             text,

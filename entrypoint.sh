@@ -4,6 +4,13 @@ set -e
 # Optional: print where we are
 echo "Current dir: $(pwd)"
 
+ARTIFACT_DIR="${ARTIFACT_DIR:-/artifacts}"
+
+mkdir -p "$ARTIFACT_DIR/sl" \
+         "$ARTIFACT_DIR/il" \
+         "$ARTIFACT_DIR/eval" \
+         "$ARTIFACT_DIR/sl/tmp"
+         
 # Wait for Postgres (simple retry loop)
 echo "Waiting for database to be ready..."
 RETRIES=1
