@@ -14,7 +14,7 @@ from transformers import (
     Trainer,
     DataCollatorWithPadding,
 )
-from sklearn.metrics import precision_recall_fscore_support, accuracy_score
+from sklearn.metrics import mean_squared_error
 
 
 DEFAULT_TRAIN_CSV = "data/train.csv"
@@ -105,21 +105,15 @@ def build_ds_from_hf(name: str, config: str | None, label_col: str, threshold: f
 
 def compute_metrics(eval_pred):
     logits, labels = eval_pred
-    logits = np.asarray(logits).squeeze(-1)
-    labels = np.asarray(labels).astype(float)
+    logits = np.asarray(logits).squeeze(-1).astype(np.float32)
+    labels = np.asarray(labels).astype(np.float32)
 
-    # model prob
+    # model prob from logit
     probs = 1.0 / (1.0 + np.exp(-logits))
 
-    # binarize labels for classification metrics
-    labels_bin = (labels >= 0.5).astype(int)   # you can make 0.5 configurable later
-    preds = (probs >= 0.5).astype(int)
-
-    acc = accuracy_score(labels_bin, preds)
-    prec, rec, f1, _ = precision_recall_fscore_support(
-        labels_bin, preds, average="binary", zero_division=0
-    )
-    return {"accuracy": float(acc), "precision_toxic": float(prec), "recall_toxic": float(rec), "f1_toxic": float(f1)}
+    mse = mean_squared_error(labels, probs)
+    rmse = float(np.sqrt(mse))
+    return {"mse": float(mse), "rmse": rmse}
 
 
 class WeightedBCETrainer(Trainer):
@@ -223,8 +217,8 @@ def main():
         dataloader_pin_memory=False,
         gradient_accumulation_steps=16,
         load_best_model_at_end=True,
-        metric_for_best_model="f1_toxic",
-        greater_is_better=True,
+        metric_for_best_model="mse",
+        greater_is_better=False,
     )
 
     trainer = WeightedBCETrainer(
