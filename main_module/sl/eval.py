@@ -25,7 +25,7 @@ import matplotlib.pyplot as plt
 
 # ---------------- Defaults ----------------
 MODEL = "roberta-base"
-MODEL_DIR = os.path.join(os.environ.get("ARTIFACT_DIR", "/artifacts"), "sl", "active")
+MODEL_DIR = os.path.join(os.environ.get("ARTIFACT_DIR", "/artifacts"), "sl", "baseline")
 DATA_CSV = os.getenv("DATA_CSV", "/app/data/test.csv")
 OUT_DIR  = os.getenv("EVAL_OUT", "/artifacts/eval")
 TEXT_COL = os.getenv("TEXT_COL", "text")

@@ -24,7 +24,8 @@ DEFAULT_EPOCHS    = 3
 DEFAULT_BSZ       = 8
 DEFAULT_MAX_LEN   = 256
 
-LABEL_BIN = "label_bin"
+LABEL = "label_score"
+#LABEL = "label_bin" # for already-binary labels
 
 
 def _clean_df(df: pd.DataFrame, name: str, label_col: str, threshold: float) -> pd.DataFrame:
@@ -47,7 +48,8 @@ def _clean_df(df: pd.DataFrame, name: str, label_col: str, threshold: float) -> 
         print(f"[{name}] dropped {int(bad.sum())} rows with invalid/missing label")
 
     # Works for both float scores and already-binary 0/1 labels.
-    df[LABEL_BIN] = (y.astype("float32") >= float(threshold)).astype("int64")
+    df["label_soft"] = y.astype("float32").clip(0.0, 1.0)
+    df[LABEL] = (df["label_soft"] >= float(threshold)).astype("int64")
 
     empty = (df["text"].str.len() == 0)
     if empty.any():
@@ -89,7 +91,7 @@ def build_ds_from_hf(name: str, config: str | None, label_col: str, threshold: f
 
     def to_bin(example):
         y = float(example[label_col])
-        example[LABEL_BIN] = 1 if y >= float(threshold) else 0
+        example[LABEL] = 1 if y >= float(threshold) else 0
         return example
 
     def rename(split):
@@ -104,34 +106,37 @@ def build_ds_from_hf(name: str, config: str | None, label_col: str, threshold: f
 def compute_metrics(eval_pred):
     logits, labels = eval_pred
     logits = np.asarray(logits).squeeze(-1)
-    labels = np.asarray(labels).astype(int)
+    labels = np.asarray(labels).astype(float)
 
+    # model prob
     probs = 1.0 / (1.0 + np.exp(-logits))
+
+    # binarize labels for classification metrics
+    labels_bin = (labels >= 0.5).astype(int)   # you can make 0.5 configurable later
     preds = (probs >= 0.5).astype(int)
 
-    acc = accuracy_score(labels, preds)
-    prec, rec, f1, _ = precision_recall_fscore_support(labels, preds, average="binary", zero_division=0)
-
-    return {
-        "accuracy": float(acc),
-        "precision_toxic": float(prec),
-        "recall_toxic": float(rec),
-        "f1_toxic": float(f1),
-    }
+    acc = accuracy_score(labels_bin, preds)
+    prec, rec, f1, _ = precision_recall_fscore_support(
+        labels_bin, preds, average="binary", zero_division=0
+    )
+    return {"accuracy": float(acc), "precision_toxic": float(prec), "recall_toxic": float(rec), "f1_toxic": float(f1)}
 
 
 class WeightedBCETrainer(Trainer):
-    def __init__(self, *args, pos_weight: float, **kwargs):
+    def __init__(self, *args, pos_weight: float = 1.0, **kwargs):
         super().__init__(*args, **kwargs)
-        self._pos_weight = float(pos_weight)
+        self.pos_weight = float(pos_weight)
 
     def compute_loss(self, model, inputs, return_outputs=False, **kwargs):
-        labels = inputs.pop("labels").float()      # [B]
+        labels = inputs.pop("labels").float()
         outputs = model(**inputs)
-        logits = outputs.logits.squeeze(-1)        # [B]
-        pw = torch.tensor([self._pos_weight], device=logits.device, dtype=torch.float32)
+        logits = outputs.logits.view(-1)
+
+        # sample weight: w = y*pos_weight + (1-y)*1
+        w = labels * self.pos_weight + (1.0 - labels) * 1.0
+
         loss = torch.nn.functional.binary_cross_entropy_with_logits(
-            logits, labels, pos_weight=pw
+            logits, labels, weight=w, reduction="mean"
         )
         return (loss, outputs) if return_outputs else loss
 
@@ -180,7 +185,7 @@ def main():
         )
 
     # Class balance -> pos_weight
-    y_train = np.array(ds["train"][LABEL_BIN], dtype=np.int64)
+    y_train = np.array(ds["train"][LABEL], dtype=np.int64)
     pos = int((y_train == 1).sum())
     neg = int((y_train == 0).sum())
     if pos == 0:
@@ -194,7 +199,7 @@ def main():
 
     def tfm(batch):
         t = tok(batch["text"], truncation=True, max_length=args.max_len)
-        t["labels"] = [float(x) for x in batch[LABEL_BIN]]
+        t["labels"] = [float(x) for x in batch["label_soft"]]  # float targets for BCE
         return t
 
     ds = DatasetDict({
