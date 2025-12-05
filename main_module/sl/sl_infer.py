@@ -27,16 +27,11 @@ def _load():
                 _model.to(_device).eval()
 
 def score_text(text: str, max_len: int = 256) -> float:
-    """
-    Return a toxicity score in [0, 1].
-
-    - If model has 2 logits (classification), use softmax and take class 1.
-    - If model has 1 logit (regression), clamp to [0,1].
-    """
     _load()
     if _model is None:
         raise RuntimeError("SL model not available yet. Train it or mount /artifacts/sl/active.")
 
+    _model.eval()
     with torch.no_grad():
         t = _tokenizer(
             text,
@@ -45,18 +40,15 @@ def score_text(text: str, max_len: int = 256) -> float:
             max_length=max_len,
         ).to(_device)
 
-        logits = _model(**t).logits  # shape [1, N]
-        # logits: [batch, num_labels]
+        logits = _model(**t).logits  # [1, N]
+
         if logits.shape[-1] == 1:
-            # regression head
-            score = logits[0, 0]
-            score = torch.clamp(score, 0.0, 1.0)
-            return float(score.item())
+            z = logits[0, 0]
+            p = torch.sigmoid(z)
+            return float(p.item())
         else:
-            # 2-class head
-            probs = torch.softmax(logits, dim=-1)  # [1,2]
-            p_toxic = probs[0, 1]
-            return float(p_toxic.item())
+            probs = torch.softmax(logits, dim=-1)
+            return float(probs[0, 1].item())
 
 def estimate_uncertainty(p: float) -> float:
     """Quick uncertainty proxy (use MC-Dropout later if needed)."""
