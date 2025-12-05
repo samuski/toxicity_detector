@@ -7,7 +7,7 @@ _tokenizer = None
 _device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 _lock = threading.Lock()
 
-MODEL_DIR = os.environ.get("SL_MODEL_DIR", "/artifacts/sl/active")
+MODEL_DIR = os.environ.get("SL_MODEL_DIR", "/artifacts/sl/baseline")
 
 def reload_model():
     global _tok, _model
