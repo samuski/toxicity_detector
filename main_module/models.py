@@ -12,7 +12,7 @@ class ModerationItem(models.Model):
         ALLOW = "ALLOW", "Allow"
         BLOCK = "BLOCK", "Block"
         ESCALATE = "ESCALATE", "Escalate"       # for more complex flows, optional
-
+    
     # Raw content
     external_id = models.CharField(
         max_length=128,
@@ -71,6 +71,27 @@ class ModerationItem(models.Model):
         help_text="Who made the final decision: SL, IL, HUMAN, RULE, etc.",
     )
 
+    needs_review = models.BooleanField(
+        default=False,
+        db_index=True,
+        help_text="If True, show in human queue due to SL↔IL disagreement or audit sampling."
+    )
+
+    il_score = models.FloatField(
+        blank=True,
+        null=True,
+        db_index=True,
+        help_text="IL model score in [0,1] (optional cached value).",
+    )
+
+    il_suggested_action = models.CharField(
+        max_length=16,
+        blank=True,
+        null=True,
+        choices=[("ALLOW", "Allow"), ("BLOCK", "Block")],
+        help_text="IL suggested action (optional cached value).",
+    )
+
     class Meta:
         indexes = [
             # Fast “queue” access: find uncertain items in time order
@@ -79,6 +100,7 @@ class ModerationItem(models.Model):
 
     def __str__(self):
         return f"[{self.pk}] {self.source or 'src'} :: {self.text[:80]}..."
+    
 
 
 class ModerationDecision(models.Model):

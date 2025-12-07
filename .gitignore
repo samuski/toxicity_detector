@@ -2,3 +2,4 @@
 artifacts/*
 *.zip
 __pycache__/
+main_module/migrations/*

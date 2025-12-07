@@ -90,34 +90,40 @@ def api_batch_score(request: HttpRequest):
 @csrf_exempt
 @require_GET
 def api_il_next(request):
-    # remaining count (what’s left to label)
-    remaining = (ModerationItem.objects
-        .filter(status=ModerationItem.Status.UNCERTAIN,
-                final_action=ModerationItem.FinalAction.NONE)
-        .count()
+    qs_review = ModerationItem.objects.filter(needs_review=True)
+    qs_uncertain = ModerationItem.objects.filter(
+        status=ModerationItem.Status.UNCERTAIN,
+        final_action=ModerationItem.FinalAction.NONE,
+        needs_review=False,
     )
 
-    item = (ModerationItem.objects
-        .filter(status=ModerationItem.Status.UNCERTAIN,
-                final_action=ModerationItem.FinalAction.NONE)
-        .order_by("created_at", "id")
-        .first()
-    )
+    remaining_review = qs_review.count()
+    remaining_uncertain = qs_uncertain.count()
+
+    item = (qs_review.order_by("created_at", "id").first()
+            or qs_uncertain.order_by("created_at", "id").first())
 
     if not item:
-        return JsonResponse({"remaining": 0, "item": None})
+        return JsonResponse({"remaining_review": 0, "remaining_uncertain": 0, "item": None})
 
     return JsonResponse({
-        "remaining": remaining,
+        "remaining_review": remaining_review,
+        "remaining_uncertain": remaining_uncertain,
         "item": {
             "id": item.id,
             "text": item.text,
             "source": item.source,
+            "created_at": item.created_at.isoformat(),
             "sl_score": item.sl_score,
             "sl_uncertainty": item.sl_uncertainty,
-            "created_at": item.created_at.isoformat(),
+            "sl_action": item.final_action,          # shows SL’s auto decision if any
+            "il_score": item.il_score,
+            "il_action": item.il_suggested_action,
+            "needs_review": item.needs_review,
+            "decision_source": item.decision_source,
         }
     })
+
 
 
 @csrf_exempt
@@ -142,7 +148,7 @@ def api_il_decide(request):
         )
 
         # Guard: if already decided, don’t double-label
-        if item.final_action != ModerationItem.FinalAction.NONE:
+        if item.final_action != ModerationItem.FinalAction.NONE and not item.needs_review:
             return JsonResponse({"error": "Item already decided."}, status=409)
 
         ModerationDecision.objects.create(
@@ -156,7 +162,9 @@ def api_il_decide(request):
         item.final_action = action
         item.status = ModerationItem.Status.CERTAIN
         item.decision_source = ModerationDecision.Source.HUMAN
-        item.save(update_fields=["final_action", "status", "decision_source", "updated_at"])
+        item.needs_review = False
+        item.save(update_fields=["final_action", "status", "decision_source", "needs_review", "updated_at"])
+
 
     return JsonResponse({"ok": True})
 
