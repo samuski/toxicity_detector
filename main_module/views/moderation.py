@@ -90,21 +90,39 @@ def api_batch_score(request: HttpRequest):
 @csrf_exempt
 @require_GET
 def api_il_next(request):
-    qs_review = ModerationItem.objects.filter(needs_review=True)
-    qs_uncertain = ModerationItem.objects.filter(
-        status=ModerationItem.Status.UNCERTAIN,
-        final_action=ModerationItem.FinalAction.NONE,
-        needs_review=False,
+    # 1) count queues
+    remaining_review = (ModerationItem.objects
+        .filter(needs_review=True, decision_source="SL")
+        .count()
     )
 
-    remaining_review = qs_review.count()
-    remaining_uncertain = qs_uncertain.count()
+    remaining_uncertain = (ModerationItem.objects
+        .filter(status=ModerationItem.Status.UNCERTAIN,
+                final_action=ModerationItem.FinalAction.NONE)
+        .count()
+    )
 
-    item = (qs_review.order_by("created_at", "id").first()
-            or qs_uncertain.order_by("created_at", "id").first())
+    # 2) pick next item: disagreements first
+    item = (ModerationItem.objects
+        .filter(needs_review=True, decision_source="SL")
+        .order_by("created_at", "id")
+        .first()
+    )
 
     if not item:
-        return JsonResponse({"remaining_review": 0, "remaining_uncertain": 0, "item": None})
+        item = (ModerationItem.objects
+            .filter(status=ModerationItem.Status.UNCERTAIN,
+                    final_action=ModerationItem.FinalAction.NONE)
+            .order_by("created_at", "id")
+            .first()
+        )
+
+    if not item:
+        return JsonResponse({
+            "remaining_review": 0,
+            "remaining_uncertain": 0,
+            "item": None,
+        })
 
     return JsonResponse({
         "remaining_review": remaining_review,
@@ -113,18 +131,70 @@ def api_il_next(request):
             "id": item.id,
             "text": item.text,
             "source": item.source,
-            "created_at": item.created_at.isoformat(),
             "sl_score": item.sl_score,
             "sl_uncertainty": item.sl_uncertainty,
-            "sl_action": item.final_action,          # shows SL’s auto decision if any
-            "il_score": item.il_score,
-            "il_action": item.il_suggested_action,
-            "needs_review": item.needs_review,
+            "il_score": getattr(item, "il_score", None),
+            "il_suggested_action": getattr(item, "il_suggested_action", None),
+            "needs_review": bool(getattr(item, "needs_review", False)),
+            "final_action": item.final_action,
             "decision_source": item.decision_source,
+            "created_at": item.created_at.isoformat(),
         }
     })
 
+@csrf_exempt
+@require_GET
+def api_il_next(request):
+    review_qs = ModerationItem.objects.filter(
+        needs_review=True,
+        # optional: only those SL auto-decided
+        decision_source="SL",
+    )
 
+    uncertain_qs = ModerationItem.objects.filter(
+        status=ModerationItem.Status.UNCERTAIN,
+        final_action=ModerationItem.FinalAction.NONE,
+        needs_review=False,
+    )
+
+    remaining_review = review_qs.count()
+    remaining_uncertain = uncertain_qs.count()
+
+    # disagreement items come first
+    item = (review_qs.order_by("updated_at", "created_at", "id").first()
+            or uncertain_qs.order_by("created_at", "id").first())
+
+    if not item:
+        return JsonResponse({
+            "remaining": 0,
+            "remaining_review": 0,
+            "remaining_uncertain": 0,
+            "item": None
+        })
+
+    return JsonResponse({
+        "remaining": remaining_review + remaining_uncertain,
+        "remaining_review": remaining_review,
+        "remaining_uncertain": remaining_uncertain,
+        "item": {
+            "id": item.id,
+            "text": item.text,
+            "source": item.source,
+            "created_at": item.created_at.isoformat(),
+
+            # SL fields
+            "sl_score": item.sl_score,
+            "sl_uncertainty": item.sl_uncertainty,
+            "sl_action": item.final_action,          # ALLOW/BLOCK if SL auto-decided
+
+            # IL fields (populated by scan)
+            "il_score": getattr(item, "il_score", None),
+            "il_suggested_action": getattr(item, "il_suggested_action", None),
+
+            # review flag
+            "needs_review": getattr(item, "needs_review", False),
+        }
+    })
 
 @csrf_exempt
 @require_POST
@@ -135,21 +205,19 @@ def api_il_decide(request):
         return JsonResponse({"error": "Invalid JSON."}, status=400)
 
     item_id = payload.get("item_id")
-    action = payload.get("action")  # "ALLOW" | "BLOCK"
+    action = payload.get("action")
     if not item_id or action not in ("ALLOW", "BLOCK"):
         return JsonResponse({"error": "Need item_id and action in {ALLOW,BLOCK}."}, status=400)
 
     actor = str(getattr(request.user, "id", None)) if getattr(request, "user", None) and request.user.is_authenticated else None
 
     with transaction.atomic():
-        item = (ModerationItem.objects
-            .select_for_update()
-            .get(id=item_id)
-        )
+        item = ModerationItem.objects.select_for_update().get(id=item_id)
 
-        # Guard: if already decided, don’t double-label
-        if item.final_action != ModerationItem.FinalAction.NONE and not item.needs_review:
-            return JsonResponse({"error": "Item already decided."}, status=409)
+        # If you want to allow overriding SL, DON'T block just because SL already set it.
+        # Only block if a HUMAN already decided before.
+        if item.decision_source == ModerationDecision.Source.HUMAN:
+            return JsonResponse({"error": "Item already decided by human."}, status=409)
 
         ModerationDecision.objects.create(
             item=item,
@@ -163,10 +231,13 @@ def api_il_decide(request):
         item.status = ModerationItem.Status.CERTAIN
         item.decision_source = ModerationDecision.Source.HUMAN
         item.needs_review = False
-        item.save(update_fields=["final_action", "status", "decision_source", "needs_review", "updated_at"])
 
+        item.save(update_fields=[
+            "final_action", "status", "decision_source", "needs_review", "updated_at"
+        ])
 
     return JsonResponse({"ok": True})
+
 
 @csrf_exempt
 @require_POST

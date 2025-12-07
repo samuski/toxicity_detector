@@ -324,6 +324,13 @@
 
         document.getElementById("il_remaining").textContent = (j.remaining ?? "-");
 
+        // (optional) add two new <b> elements in HTML, then:
+        if (document.getElementById("il_remaining_review")) {
+          document.getElementById("il_remaining_review").textContent = (j.remaining_review ?? "-");
+        }
+        if (document.getElementById("il_remaining_uncertain")) {
+          document.getElementById("il_remaining_uncertain").textContent = (j.remaining_uncertain ?? "-");
+        }
         if (!j.item) {
           currentIlItemId = null;
           document.getElementById("il_text").textContent = "No items left 🎉";
@@ -384,6 +391,11 @@
         set("il_unc", (item.sl_uncertainty != null ? Number(item.sl_uncertainty).toFixed(4) : "-"));
         set("il_source", item.source || "-");
         set("il_id", String(item.id));
+
+        set("il_il_score", item.il_score != null ? Number(item.il_score).toFixed(4) : "-");
+        set("il_il_suggested", item.il_suggested_action || "-");
+        set("il_sl_action", item.sl_action || "-");
+        set("il_needs_review", item.needs_review ? "YES" : "no");
       }
 
       function setIlStatus(msg) {
