@@ -1,39 +1,37 @@
-from pathlib import Path
-from django.conf import settings
-import joblib
+# main_module/il/il_infer.py
+import os, threading, torch
+from transformers import AutoTokenizer, AutoModelForSequenceClassification
 
-_VEC = None
-_MODEL = None
-_LOADED_ITER = None
+_model = None
+_tokenizer = None
+_device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+_lock = threading.Lock()
 
-def _latest_iter_dir() -> Path | None:
-    base = Path(settings.IL_DIR)
-    if not base.exists():
-        return None
-    iters = sorted([p for p in base.glob("iter_*") if p.is_dir()])
-    return iters[-1] if iters else None
+MODEL_DIR = os.environ.get("IL_MODEL_DIR", "/artifacts/il/active")
 
-def reload_il(iter_num: int | None = None):
-    global _VEC, _MODEL, _LOADED_ITER
-    if iter_num is None:
-        d = _latest_iter_dir()
-        if d is None:
-            raise FileNotFoundError("No IL iterations found under media/il/")
-        iter_num = int(d.name.split("_")[1])
-        iter_dir = d
-    else:
-        iter_dir = Path(settings.IL_DIR) / f"iter_{iter_num:03d}"
+def set_model_dir(path: str):
+    """Switch IL checkpoint directory at runtime (and clear cache)."""
+    global MODEL_DIR, _model, _tokenizer
+    MODEL_DIR = path
+    _model = None
+    _tokenizer = None
+    print(f"[IL] Using model dir: {MODEL_DIR}")
 
-    art = iter_dir / "artifacts"
-    _VEC = joblib.load(art / "vectorizer.joblib")
-    _MODEL = joblib.load(art / "model.joblib")
-    _LOADED_ITER = iter_num
+def _load():
+    global _model, _tokenizer
+    if _model is None:
+        with _lock:
+            if _model is None:
+                if not os.path.isdir(MODEL_DIR):
+                    raise RuntimeError(f"[IL] model dir missing: {MODEL_DIR}")
+                _tokenizer = AutoTokenizer.from_pretrained(MODEL_DIR)
+                _model = AutoModelForSequenceClassification.from_pretrained(MODEL_DIR)
+                _model.to(_device).eval()
 
-def il_score_text(text: str) -> float:
-    if _VEC is None or _MODEL is None:
-        reload_il()  # loads latest by default
-    X = _VEC.transform([text])
-    return float(_MODEL.predict_proba(X)[0, 1])
-
-def il_loaded_iter() -> int | None:
-    return _LOADED_ITER
+def il_score_text(text: str, max_len: int = 256) -> float:
+    _load()
+    with torch.no_grad():
+        t = _tokenizer(text, return_tensors="pt", truncation=True, max_length=max_len).to(_device)
+        logits = _model(**t).logits
+        z = logits[0, 0]
+        return float(torch.sigmoid(z).item())
