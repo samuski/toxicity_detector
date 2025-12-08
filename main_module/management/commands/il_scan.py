@@ -1,4 +1,6 @@
+# main_module/management/commands/il_scan.py
 from pathlib import Path
+
 from django.core.management.base import BaseCommand
 
 from main_module.models import ModerationItem
@@ -16,35 +18,40 @@ class Command(BaseCommand):
         parser.add_argument("--il_high", type=float, default=0.8)
         parser.add_argument("--limit", type=int, default=0)
 
-        # NEW:
-        parser.add_argument("--il_iter", type=int, default=0,
-                            help="IL iteration to use (e.g. 1,2,3). 0 = do not override.")
-        parser.add_argument("--il_dir", default="",
-                            help="Explicit IL artifacts dir (overrides --il_iter).")
+        # Choose which IL iteration/artifacts to use
+        parser.add_argument("--il_iter", type=int, default=1)
+        parser.add_argument(
+            "--il_dir",
+            default="",
+            help="Explicit IL artifacts dir (overrides --il_iter).",
+        )
+
+        # Optional: use a different decision threshold for IL suggested action
+        parser.add_argument("--il_decision_th", type=float, default=0.5)
 
     def handle(self, *args, **opts):
         source = opts["source"]
-        sl_low, sl_high = opts["sl_low"], opts["sl_high"]
-        il_low, il_high = opts["il_low"], opts["il_high"]
-        limit = opts["limit"]
-
+        sl_low, sl_high = float(opts["sl_low"]), float(opts["sl_high"])
+        il_low, il_high = float(opts["il_low"]), float(opts["il_high"])
+        limit = int(opts["limit"]) if opts["limit"] else 0
         il_iter = int(opts["il_iter"])
         il_dir = (opts["il_dir"] or "").strip()
+        il_decision_th = float(opts["il_decision_th"])
 
-        # Choose IL model dir
+        # --- Pick IL model dir (joblib artifacts) ---
+        chosen = None
         if il_dir:
             chosen = Path(il_dir)
         elif il_iter > 0:
             chosen = Path(f"/app/media/il/iter_{il_iter:03d}/artifacts")
-        else:
-            # fall back to whatever il_infer defaults to (env IL_MODEL_DIR, etc.)
-            chosen = None
 
         if chosen is not None:
             if not chosen.is_dir():
                 raise SystemExit(f"IL model dir not found: {chosen}")
             il_infer.set_model_dir(str(chosen))
+            self.stdout.write(self.style.WARNING(f"[IL] Using model dir: {chosen}"))
 
+        # --- Query: scan SL-certain items decided by SL ---
         qs = ModerationItem.objects.filter(
             decision_source="SL",
             status=ModerationItem.Status.CERTAIN,
@@ -61,22 +68,31 @@ class Command(BaseCommand):
 
         for item in qs.iterator(chunk_size=500):
             scanned += 1
-            p_il = float(il_infer.il_score_text(item.text))
-            il_action = "BLOCK" if p_il >= 0.5 else "ALLOW"
 
+            # IL probability
+            p_il = float(il_infer.il_score_text(item.text))
+            il_action = "BLOCK" if p_il >= il_decision_th else "ALLOW"
+
+            # Store IL info (do NOT overwrite SL decision)
             item.il_score = p_il
             item.il_suggested_action = il_action
 
+            # SL action derived from what SL already set
             sl_action = item.final_action  # "ALLOW" or "BLOCK"
 
-            sl_conf_allow = (item.sl_score is not None and item.sl_score <= sl_low and sl_action == "ALLOW")
-            sl_conf_block = (item.sl_score is not None and item.sl_score >= sl_high and sl_action == "BLOCK")
+            # "strong disagreement" only when both are confident
+            sl_conf_allow = (
+                item.sl_score is not None and item.sl_score <= sl_low and sl_action == "ALLOW"
+            )
+            sl_conf_block = (
+                item.sl_score is not None and item.sl_score >= sl_high and sl_action == "BLOCK"
+            )
             il_conf_allow = (p_il <= il_low)
             il_conf_block = (p_il >= il_high)
 
-            disagree = ((sl_conf_allow and il_conf_block) or (sl_conf_block and il_conf_allow))
+            disagree = (sl_conf_allow and il_conf_block) or (sl_conf_block and il_conf_allow)
 
-            # IMPORTANT: also clear old flags when no longer disagreeing
+            # IMPORTANT: clear old flags when no longer disagreeing
             item.needs_review = bool(disagree)
             if disagree:
                 flagged += 1
