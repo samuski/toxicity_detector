@@ -14,9 +14,9 @@ from transformers import (
     Trainer,
     DataCollatorWithPadding,
 )
-from sklearn.metrics import mean_squared_error
+from sklearn.metrics import accuracy_score, precision_recall_fscore_support, mean_squared_error
 
-
+from eval import accuracy_score, precision_recall_fscore_support
 DEFAULT_TRAIN_CSV = "data/train.csv"
 DEFAULT_VAL_CSV   = "data/val.csv"
 DEFAULT_MODEL     = "roberta-base"
@@ -24,11 +24,11 @@ DEFAULT_EPOCHS    = 3
 DEFAULT_BSZ       = 8
 DEFAULT_MAX_LEN   = 256
 
-LABEL = "label_score"
-#LABEL = "label_bin" # for already-binary labels
+# LABEL = "label_score"
+LABEL_BIN = "label_bin" # for already-binary labels
 
 
-def _clean_df(df: pd.DataFrame, name: str, label_col: str, threshold: float) -> pd.DataFrame:
+def _clean_df(df: pd.DataFrame, name: str, label_col: str) -> pd.DataFrame:
     if "text" not in df.columns or label_col not in df.columns:
         raise ValueError(f"{name}.csv must have columns: text,{label_col}")
 
@@ -47,9 +47,11 @@ def _clean_df(df: pd.DataFrame, name: str, label_col: str, threshold: float) -> 
         y = y[~bad]
         print(f"[{name}] dropped {int(bad.sum())} rows with invalid/missing label")
 
-    # Works for both float scores and already-binary 0/1 labels.
-    df["label_soft"] = y.astype("float32").clip(0.0, 1.0)
-    df[LABEL] = (df["label_soft"] >= float(threshold)).astype("int64")
+    # force 0/1
+    y = y.astype("int64")
+    y = y.clip(0, 1)
+
+    df[LABEL_BIN] = y
 
     empty = (df["text"].str.len() == 0)
     if empty.any():
@@ -65,12 +67,12 @@ def build_ds_from_csv(train_csv: str, val_csv: str, label_col: str, threshold: f
     df_tr = pd.read_csv(train_csv, **read_opts)
     df_va = pd.read_csv(val_csv,   **read_opts)
 
-    df_tr = _clean_df(df_tr, "train", label_col, threshold)
-    df_va = _clean_df(df_va, "val",   label_col, threshold)
+    df_tr = _clean_df(df_tr, "train", label_col)
+    df_va = _clean_df(df_va, "val",   label_col)
 
     if augment_csv:
         df_aug = pd.read_csv(augment_csv, **read_opts)
-        df_aug = _clean_df(df_aug, "augment", label_col, threshold)
+        df_aug = _clean_df(df_aug, "augment", label_col)
         df_tr = pd.concat([df_tr, df_aug], ignore_index=True)
         print(f"[train] appended augment rows: +{len(df_aug)} (total train={len(df_tr)})")
 
@@ -91,7 +93,7 @@ def build_ds_from_hf(name: str, config: str | None, label_col: str, threshold: f
 
     def to_bin(example):
         y = float(example[label_col])
-        example[LABEL] = 1 if y >= float(threshold) else 0
+        example[LABEL_BIN] = 1 if y >= float(threshold) else 0
         return example
 
     def rename(split):
@@ -105,15 +107,16 @@ def build_ds_from_hf(name: str, config: str | None, label_col: str, threshold: f
 
 def compute_metrics(eval_pred):
     logits, labels = eval_pred
-    logits = np.asarray(logits).squeeze(-1).astype(np.float32)
-    labels = np.asarray(labels).astype(np.float32)
+    logits = np.asarray(logits).squeeze(-1)
+    labels = np.asarray(labels).astype(int)
 
-    # model prob from logit
     probs = 1.0 / (1.0 + np.exp(-logits))
+    preds = (probs >= 0.5).astype(int)
 
-    mse = mean_squared_error(labels, probs)
-    rmse = float(np.sqrt(mse))
-    return {"mse": float(mse), "rmse": rmse}
+    acc = accuracy_score(labels, preds)
+    prec, rec, f1, _ = precision_recall_fscore_support(labels, preds, average="binary", zero_division=0)
+    return {"accuracy": float(acc), "precision_toxic": float(prec), "recall_toxic": float(rec), "f1_toxic": float(f1)}
+
 
 
 class WeightedBCETrainer(Trainer):
@@ -150,7 +153,7 @@ def main():
 
     ap.add_argument("--tag", default=os.environ.get("SL_TAG", "active"))
 
-    ap.add_argument("--label_col", default=os.environ.get("LABEL_COL", "label_score"))
+    ap.add_argument("--label_col", default=os.environ.get("LABEL_COL", "label_bin"))
     ap.add_argument("--label_threshold", type=float, default=float(os.environ.get("LABEL_TH", 0.5)))
     ap.add_argument("--pos_weight", default=os.environ.get("POS_WEIGHT", "auto"),
                     help="Use 'auto' or a float (e.g., 6.0).")
@@ -179,7 +182,7 @@ def main():
         )
 
     # Class balance -> pos_weight
-    y_train = np.array(ds["train"][LABEL], dtype=np.int64)
+    y_train = np.array(ds["train"][LABEL_BIN], dtype=np.int64)
     pos = int((y_train == 1).sum())
     neg = int((y_train == 0).sum())
     if pos == 0:
@@ -193,7 +196,7 @@ def main():
 
     def tfm(batch):
         t = tok(batch["text"], truncation=True, max_length=args.max_len)
-        t["labels"] = [float(x) for x in batch["label_soft"]]  # float targets for BCE
+        t["labels"] = [int(x) for x in batch[LABEL_BIN]]
         return t
 
     ds = DatasetDict({
@@ -217,8 +220,8 @@ def main():
         dataloader_pin_memory=False,
         gradient_accumulation_steps=16,
         load_best_model_at_end=True,
-        metric_for_best_model="mse",
-        greater_is_better=False,
+        metric_for_best_model="f1_toxic",
+        greater_is_better=True,
     )
 
     trainer = WeightedBCETrainer(

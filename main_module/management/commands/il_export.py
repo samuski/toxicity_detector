@@ -15,7 +15,7 @@ class Command(BaseCommand):
 
     def handle(self, *args, **opts):
         k = int(opts["iter"])
-        limit = int(opts["limit"])
+        limit = int(opts["limit"]) * k
 
         out_dir = Path(settings.IL_DIR) / f"iter_{k:03d}"
         out_dir.mkdir(parents=True, exist_ok=True)
