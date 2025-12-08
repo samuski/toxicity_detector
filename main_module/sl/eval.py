@@ -2,6 +2,9 @@
 import argparse, os, glob, time
 from pathlib import Path
 from typing import List, Optional, Dict
+from datetime import datetime
+
+from sympy import re
 import joblib
 
 import numpy as np
@@ -409,7 +412,13 @@ def main():
 
     summary = pd.DataFrame(summary_rows)
     summary = summary.sort_values(by=["mode", "f1_macro"], ascending=[True, False])
-    summary_csv = outdir / "summary.csv"
+    def _safe(s: str) -> str:
+        s = re.sub(r"[^\w.\-]+", "_", s)
+        return s.strip("_")[:120] or "run"
+
+    run_tag = _safe(args.weights)
+    ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+    summary_csv = outdir / f"summary__{run_tag}__{ts}.csv"
     summary.to_csv(summary_csv, index=False)
     print(f"\nWrote summary to: {summary_csv}")
     print(summary.to_string(index=False))
