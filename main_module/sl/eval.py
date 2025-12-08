@@ -2,6 +2,7 @@
 import argparse, os, glob, time
 from pathlib import Path
 from typing import List, Optional, Dict
+import joblib
 
 import numpy as np
 import pandas as pd
@@ -34,6 +35,33 @@ LABEL_COL = os.getenv("LABEL_COL", "label_score")
 # This is ONLY for binarizing label_score -> y_true, and for the manual eval row.
 LABEL_THRESHOLD_DEFAULT = float(os.getenv("LABEL_THRESHOLD", "0.5"))
 
+def is_il_joblib_dir(p: Path) -> bool:
+    return (p / "model.joblib").exists() and (p / "vectorizer.joblib").exists()
+
+def infer_probs_il_joblib(model_dir: Path, texts: list[str]) -> np.ndarray:
+    """
+    Returns p(toxic) in [0,1] using IL artifacts:
+      - vectorizer.joblib
+      - model.joblib
+    Supports models with predict_proba or decision_function.
+    """
+    vec = joblib.load(model_dir / "vectorizer.joblib")
+    mdl = joblib.load(model_dir / "model.joblib")
+
+    X = vec.transform(texts)
+
+    if hasattr(mdl, "predict_proba"):
+        p = mdl.predict_proba(X)[:, 1]
+        return np.asarray(p, dtype=np.float32)
+
+    if hasattr(mdl, "decision_function"):
+        z = mdl.decision_function(X)
+        z = np.asarray(z, dtype=np.float32)
+        return 1.0 / (1.0 + np.exp(-z))  # sigmoid
+
+    # last-resort: hard predictions only (0/1). Not ideal but won’t crash.
+    y = mdl.predict(X)
+    return np.asarray(y, dtype=np.float32)
 
 # ---------------- Data ----------------
 class TextDataset(Dataset):
@@ -203,43 +231,52 @@ def evaluate_one_weight(
 
     # --- 2) Load tokenizer & model ---
     weight_path = Path(weight_path)
-    if weight_path.is_dir():
-        tokenizer = AutoTokenizer.from_pretrained(weight_path, use_fast=True)
-        model = AutoModelForSequenceClassification.from_pretrained(weight_path)
+    # --- IL (joblib) path ---
+    if weight_path.is_dir() and is_il_joblib_dir(weight_path):
+        y_prob = infer_probs_il_joblib(weight_path, texts)
+        y_prob = np.clip(y_prob.reshape(-1), 0.0, 1.0)
+
+        # nicer tag so iter_002 doesn’t become just "artifacts"
+        tag = f"il_{weight_path.parent.name}" if weight_path.name == "artifacts" else f"il_{weight_path.name}"
+
+    # --- SL (Transformers) path ---
     else:
-        tokenizer = AutoTokenizer.from_pretrained(model_name_or_path, use_fast=True)
-        model = AutoModelForSequenceClassification.from_pretrained(
-            model_name_or_path,
-            num_labels=1,
+        if weight_path.is_dir():
+            tokenizer = AutoTokenizer.from_pretrained(weight_path, use_fast=True)
+            model = AutoModelForSequenceClassification.from_pretrained(weight_path)
+            tag = weight_path.name
+        else:
+            tokenizer = AutoTokenizer.from_pretrained(model_name_or_path, use_fast=True)
+            model = AutoModelForSequenceClassification.from_pretrained(model_name_or_path, num_labels=1)
+            state = torch.load(str(weight_path), map_location="cpu", weights_only=False)
+            if isinstance(state, dict) and "state_dict" in state:
+                state = state["state_dict"]
+            missing, unexpected = model.load_state_dict(state, strict=False)
+            if unexpected:
+                print(f"[WARN] Unexpected keys in state_dict: {unexpected}")
+            if missing:
+                print(f"[WARN] Missing keys in state_dict: {missing}")
+            tag = weight_path.stem
+
+        model.to(device)
+
+        ds = TextDataset(texts, y_true)
+        dl = DataLoader(
+            ds,
+            batch_size=batch_size,
+            shuffle=False,
+            num_workers=0,
+            collate_fn=lambda b: collate_fn(b, tokenizer, max_length),
         )
-        state = torch.load(str(weight_path), map_location="cpu", weights_only=False)
-        if isinstance(state, dict) and "state_dict" in state:
-            state = state["state_dict"]
-        missing, unexpected = model.load_state_dict(state, strict=False)
-        if unexpected:
-            print(f"[WARN] Unexpected keys in state_dict: {unexpected}")
-        if missing:
-            print(f"[WARN] Missing keys in state_dict: {missing}")
 
-    model.to(device)
+        logits = infer_logits(model, dl, device=device)
+        if logits.shape[1] == 1:
+            z = logits.reshape(-1)
+            y_prob = 1.0 / (1.0 + np.exp(-z))   # sigmoid
+        else:
+            y_prob = softmax(logits, axis=1)[:, 1]
 
-    # --- 3) Inference ---
-    ds = TextDataset(texts, y_true)
-    dl = DataLoader(
-        ds,
-        batch_size=batch_size,
-        shuffle=False,
-        num_workers=0,
-        collate_fn=lambda b: collate_fn(b, tokenizer, max_length),
-    )
-
-    logits = infer_logits(model, dl, device=device)
-    if logits.shape[1] == 1:
-        # binary logits -> probability
-        z = logits.reshape(-1)
-        y_prob = 1.0 / (1.0 + np.exp(-z))   # sigmoid
-    else:
-        y_prob = softmax(logits, axis=1)[:, 1]
+        y_prob = np.clip(y_prob.reshape(-1), 0.0, 1.0)
 
     # --- 4) Metrics: manual threshold vs auto best-F1 ---
     # manual: use label_threshold as the policy threshold
@@ -249,7 +286,7 @@ def evaluate_one_weight(
     best_metrics, best_cm = best_threshold_by_f1(y_true, y_prob, threshold_grid)
 
     # --- 5) Save per-weight outputs ---
-    tag = weight_path.stem
+    # tag = weight_path.stem
     preds_csv = outdir / f"{tag}__preds.csv"
     pd.DataFrame(
         {
