@@ -29,6 +29,14 @@ class Command(BaseCommand):
         # Optional: use a different decision threshold for IL suggested action
         parser.add_argument("--il_decision_th", type=float, default=0.5)
 
+        # NEW: by default we sweep UNCERTAIN; this flag disables that behaviour
+        parser.add_argument(
+            "--no-sweep-uncertain",
+            action="store_true",
+            help="Do NOT run IL over UNCERTAIN items (only scan SL-CERTAIN).",
+        )
+
+
     def handle(self, *args, **opts):
         source = opts["source"]
         sl_low, sl_high = float(opts["sl_low"]), float(opts["sl_high"])
@@ -102,3 +110,65 @@ class Command(BaseCommand):
         self.stdout.write(self.style.SUCCESS(
             f"Scanned {scanned} rows. Flagged {flagged} for human review."
         ))
+
+        # Promot uncertain items based on IL scores
+        if not opts.get("no_sweep_uncertain"):
+            il_low = float(opts["il_low"])
+            il_high = float(opts["il_high"])
+
+            qs_unc = ModerationItem.objects.filter(
+                status=ModerationItem.Status.UNCERTAIN,
+            ).exclude(decision_source="HUMAN")
+
+            if source:
+                qs_unc = qs_unc.filter(source=source)
+
+            total_unc = qs_unc.count()
+            promoted = 0
+
+            self.stdout.write(
+                self.style.WARNING(
+                    f"[IL] Sweeping {total_unc} UNCERTAIN items "
+                    f"(using il_low={il_low}, il_high={il_high})"
+                )
+            )
+
+            for item in qs_unc.iterator(chunk_size=500):
+                p_il = float(il_infer.il_score_text(item.text))
+
+                new_action = None
+                if p_il <= il_low:
+                    new_action = "ALLOW"
+                elif p_il >= il_high:
+                    new_action = "BLOCK"
+
+                if not new_action:
+                    # Still ambiguous → remain UNCERTAIN, just store IL score
+                    item.il_score = p_il
+                    item.save(update_fields=["il_score"])
+                    continue
+
+                # Auto-promote this item to CERTAIN(IL)
+                item.final_action = new_action
+                item.status = ModerationItem.Status.CERTAIN
+                item.decision_source = "IL"
+                item.il_score = p_il
+                item.il_suggested_action = new_action
+                item.needs_review = False
+                item.save(
+                    update_fields=[
+                        "final_action",
+                        "status",
+                        "decision_source",
+                        "il_score",
+                        "il_suggested_action",
+                        "needs_review",
+                    ]
+                )
+                promoted += 1
+
+            self.stdout.write(
+                self.style.SUCCESS(
+                    f"[IL] UNCERTAIN sweep done. Auto-promoted {promoted}/{total_unc} items."
+                )
+            )
