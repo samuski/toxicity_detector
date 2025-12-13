@@ -51,7 +51,7 @@ class Command(BaseCommand):
         if il_dir:
             chosen = Path(il_dir)
         elif il_iter > 0:
-            chosen = Path(f"/app/media/il/iter_{il_iter:03d}/artifacts")
+            chosen = Path(f"/app/artifacts/il/iter_{il_iter:03d}/artifacts")
 
         if chosen is not None:
             if not chosen.is_dir():
