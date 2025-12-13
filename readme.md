@@ -37,6 +37,7 @@ docker compose exec web \
 ### Scan
 
 Use new model to check for SL and IL disagreement and convert uncertain items to certain if it's very certain.
+[Optional] `--review-confident-items` This tag enables review of all the items that was marked as confident to have new iteration review the old
 
 ```
 docker compose exec web \
@@ -45,5 +46,6 @@ docker compose exec web \
     --il_iter [iter_count] \
     --sl_low 0.2 --sl_high 0.8 \
     --il_low 0.2 --il_high 0.8 \
-    --il_decision_th 0.5
+    --il_decision_th 0.5 \
+    --review-confident-items
 ```
