@@ -90,86 +90,45 @@ def api_batch_score(request: HttpRequest):
 @csrf_exempt
 @require_GET
 def api_il_next(request):
-    # 1) count queues
-    remaining_review = (ModerationItem.objects
-        .filter(needs_review=True, decision_source="SL")
-        .count()
-    )
+    """
+    IL queue:
+      - First: items explicitly marked needs_review=True (disagreements, dredged IL items),
+               but not yet decided by HUMAN.
+      - Then: other UNCERTAIN, non-HUMAN items (general IL pool).
+    """
+    source = request.GET.get("source") or None
 
-    remaining_uncertain = (ModerationItem.objects
-        .filter(status=ModerationItem.Status.UNCERTAIN,
-                final_action=ModerationItem.FinalAction.NONE)
-        .count()
-    )
-
-    # 2) pick next item: disagreements first
-    item = (ModerationItem.objects
-        .filter(needs_review=True, decision_source="SL")
-        .order_by("created_at", "id")
-        .first()
-    )
-
-    if not item:
-        item = (ModerationItem.objects
-            .filter(status=ModerationItem.Status.UNCERTAIN,
-                    final_action=ModerationItem.FinalAction.NONE)
-            .order_by("created_at", "id")
-            .first()
-        )
-
-    if not item:
-        return JsonResponse({
-            "remaining_review": 0,
-            "remaining_uncertain": 0,
-            "item": None,
-        })
-
-    return JsonResponse({
-        "remaining_review": remaining_review,
-        "remaining_uncertain": remaining_uncertain,
-        "item": {
-            "id": item.id,
-            "text": item.text,
-            "source": item.source,
-            "sl_score": item.sl_score,
-            "sl_uncertainty": item.sl_uncertainty,
-            "il_score": getattr(item, "il_score", None),
-            "il_suggested_action": getattr(item, "il_suggested_action", None),
-            "needs_review": bool(getattr(item, "needs_review", False)),
-            "final_action": item.final_action,
-            "decision_source": item.decision_source,
-            "created_at": item.created_at.isoformat(),
-        }
-    })
-
-@csrf_exempt
-@require_GET
-def api_il_next(request):
+    # Items explicitly queued for review (from il_scan downgrades, review-confident-items, etc.)
     review_qs = ModerationItem.objects.filter(
+        status=ModerationItem.Status.UNCERTAIN,
         needs_review=True,
-        # optional: only those SL auto-decided
-        decision_source="SL",
-    )
+    ).exclude(decision_source=ModerationDecision.Source.HUMAN)
 
+    # Other uncertain items that IL / SL left as UNCERTAIN but not yet human-decided
     uncertain_qs = ModerationItem.objects.filter(
         status=ModerationItem.Status.UNCERTAIN,
-        final_action=ModerationItem.FinalAction.NONE,
         needs_review=False,
-    )
+    ).exclude(decision_source=ModerationDecision.Source.HUMAN)
+
+    if source:
+        review_qs = review_qs.filter(source=source)
+        uncertain_qs = uncertain_qs.filter(source=source)
 
     remaining_review = review_qs.count()
     remaining_uncertain = uncertain_qs.count()
 
-    # disagreement items come first
-    item = (review_qs.order_by("updated_at", "created_at", "id").first()
-            or uncertain_qs.order_by("created_at", "id").first())
+    # disagreements/review items first, then general uncertain pool
+    item = (
+        review_qs.order_by("updated_at", "created_at", "id").first()
+        or uncertain_qs.order_by("created_at", "id").first()
+    )
 
     if not item:
         return JsonResponse({
             "remaining": 0,
             "remaining_review": 0,
             "remaining_uncertain": 0,
-            "item": None
+            "item": None,
         })
 
     return JsonResponse({
@@ -182,18 +141,18 @@ def api_il_next(request):
             "source": item.source,
             "created_at": item.created_at.isoformat(),
 
-            # SL fields
+            # SL-ish fields (for display; final_action may originally come from SL)
             "sl_score": item.sl_score,
             "sl_uncertainty": item.sl_uncertainty,
-            "sl_action": item.final_action,          # ALLOW/BLOCK if SL auto-decided
+            "sl_action": item.final_action,
 
-            # IL fields (populated by scan)
+            # IL fields (populated by il_scan)
             "il_score": getattr(item, "il_score", None),
             "il_suggested_action": getattr(item, "il_suggested_action", None),
 
-            # review flag
-            "needs_review": getattr(item, "needs_review", False),
-        }
+            "needs_review": bool(getattr(item, "needs_review", False)),
+            "decision_source": item.decision_source,
+        },
     })
 
 @csrf_exempt

@@ -1,4 +1,3 @@
-# main_module/management/commands/il_scan.py
 from pathlib import Path
 
 from django.core.management.base import BaseCommand
@@ -26,7 +25,7 @@ class Command(BaseCommand):
             help="Explicit IL artifacts dir (overrides --il_iter).",
         )
 
-        # Optional: decision threshold for IL suggested action
+        # Decision threshold for IL suggested action (for BLOCK vs ALLOW label)
         parser.add_argument("--il_decision_th", type=float, default=0.5)
 
         # By default we also sweep UNCERTAIN; this flag disables that behaviour
@@ -34,6 +33,17 @@ class Command(BaseCommand):
             "--no-sweep-uncertain",
             action="store_true",
             help="Do NOT run IL over UNCERTAIN items (only scan SL-CERTAIN).",
+        )
+
+        # NEW: optionally re-check IL-CERTAIN items using the *newest* IL model
+        parser.add_argument(
+            "--review-confident-items",
+            action="store_true",
+            help=(
+                "Re-score items already decided by IL (CERTAIN+IL) and "
+                "downgrade to UNCERTAIN if the new IL model is no longer confident "
+                "or strongly disagrees with the previous IL score."
+            ),
         )
 
     def handle(self, *args, **opts):
@@ -44,12 +54,14 @@ class Command(BaseCommand):
         il_iter = int(opts["il_iter"])
         il_dir = (opts["il_dir"] or "").strip()
         il_decision_th = float(opts["il_decision_th"])
+        review_confident = bool(opts.get("review_confident_items"))
 
         # --- Pick IL model dir (joblib artifacts) ---
         chosen = None
         if il_dir:
             chosen = Path(il_dir)
         elif il_iter > 0:
+            # adjust this root to match your actual IL_DIR if needed
             chosen = Path(f"/app/artifacts/il/iter_{il_iter:03d}/artifacts")
 
         if chosen is not None:
@@ -72,21 +84,21 @@ class Command(BaseCommand):
         if limit and limit > 0:
             qs = qs[:limit]
 
-        flagged = 0      # number of items downgraded to UNCERTAIN
         scanned = 0
+        downgraded_from_sl = 0
 
         for item in qs.iterator(chunk_size=500):
             scanned += 1
 
-            # IL probability
+            # New IL probability
             p_il = float(il_infer.il_score_text(item.text))
             il_action = "BLOCK" if p_il >= il_decision_th else "ALLOW"
 
-            # Always store IL info
+            # Always store latest IL info
             item.il_score = p_il
             item.il_suggested_action = il_action
 
-            # SL action derived from what SL already set
+            # SL action already stored as final_action
             sl_action = item.final_action  # "ALLOW" or "BLOCK"
 
             # "strong disagreement" only when both are confident
@@ -108,10 +120,9 @@ class Command(BaseCommand):
             if disagree:
                 # Downgrade: IL says "this confident SL decision looks wrong"
                 item.status = ModerationItem.Status.UNCERTAIN
-                # Optionally tag this source; or leave as None if you prefer
                 item.decision_source = None
                 item.needs_review = True
-                flagged += 1
+                downgraded_from_sl += 1
                 update_fields = [
                     "il_score",
                     "il_suggested_action",
@@ -130,17 +141,20 @@ class Command(BaseCommand):
 
             item.save(update_fields=update_fields)
 
-        self.stdout.write(self.style.SUCCESS(
-            f"[IL] Scanned {scanned} SL-CERTAIN rows. Downgraded {flagged} to UNCERTAIN for human/IL review."
-        ))
+        self.stdout.write(
+            self.style.SUCCESS(
+                f"[IL] Scanned {scanned} SL-CERTAIN rows. "
+                f"Downgraded {downgraded_from_sl} to UNCERTAIN for review."
+            )
+        )
 
         # ------------------------------------------------------------------
         # 2) Sweep UNCERTAIN items: let IL auto-promote very confident ones
         # ------------------------------------------------------------------
-        if not opts.get("no_sweep-uncertain"):
+        if not opts.get("no_sweep_uncertain"):
             qs_unc = ModerationItem.objects.filter(
                 status=ModerationItem.Status.UNCERTAIN,
-            ).exclude(decision_source="HUMAN")  # keep human decisions sacred
+            ).exclude(decision_source="HUMAN")  # keep HUMAN decisions untouched
 
             if source:
                 qs_unc = qs_unc.filter(source=source)
@@ -192,5 +206,83 @@ class Command(BaseCommand):
             self.stdout.write(
                 self.style.SUCCESS(
                     f"[IL] UNCERTAIN sweep done. Auto-promoted {promoted}/{total_unc} items."
+                )
+            )
+
+        # ------------------------------------------------------------------
+        # 3) OPTIONAL: dredge IL-CERTAIN items using the *new* IL model
+        # ------------------------------------------------------------------
+        if review_confident:
+            qs_conf = ModerationItem.objects.filter(
+                status=ModerationItem.Status.CERTAIN,
+                decision_source="IL",
+            )
+            if source:
+                qs_conf = qs_conf.filter(source=source)
+
+            total_conf = qs_conf.count()
+            redowngraded = 0
+
+            self.stdout.write(
+                self.style.WARNING(
+                    f"[IL] Re-checking {total_conf} IL-CERTAIN items "
+                    f"(review_confident_items, il_low={il_low}, il_high={il_high})"
+                )
+            )
+
+            for item in qs_conf.iterator(chunk_size=500):
+                prev_il = item.il_score  # score from previous IL iteration
+                p_il = float(il_infer.il_score_text(item.text))
+                item.il_score = p_il  # always store latest score
+
+                # Old IL confidence side
+                prev_conf_allow = prev_il is not None and prev_il <= il_low
+                prev_conf_block = prev_il is not None and prev_il >= il_high
+
+                # New IL confidence side
+                new_conf_allow = p_il <= il_low
+                new_conf_block = p_il >= il_high
+
+                # If the *side* of decision flips while both are confident,
+                # or the new IL falls into the ambiguous middle region,
+                # we downgrade to UNCERTAIN again.
+                flip = (
+                    (prev_conf_allow and new_conf_block) or
+                    (prev_conf_block and new_conf_allow)
+                )
+                now_ambiguous = not (new_conf_allow or new_conf_block)
+
+                if flip or now_ambiguous:
+                    item.status = ModerationItem.Status.UNCERTAIN
+                    item.decision_source = None
+                    item.needs_review = True
+                    item.il_suggested_action = None
+                    redowngraded += 1
+                    item.save(
+                        update_fields=[
+                            "status",
+                            "decision_source",
+                            "needs_review",
+                            "il_score",
+                            "il_suggested_action",
+                        ]
+                    )
+                else:
+                    # Still confident and consistent → keep as IL decision
+                    item.needs_review = False
+                    item.il_suggested_action = (
+                        "BLOCK" if p_il >= il_decision_th else "ALLOW"
+                    )
+                    item.save(
+                        update_fields=[
+                            "needs_review",
+                            "il_score",
+                            "il_suggested_action",
+                        ]
+                    )
+
+            self.stdout.write(
+                self.style.SUCCESS(
+                    f"[IL] review-confident-items: downgraded {redowngraded}/{total_conf} IL-CERTAIN items to UNCERTAIN."
                 )
             )
