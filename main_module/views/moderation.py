@@ -12,7 +12,7 @@ from django.db import transaction
 
 from main_module.sl.sl_infer import reload_model, score_text, estimate_uncertainty, score_text_with_dir
 
-from main_module.il.il_infer import il_score_text, set_model_dir
+from main_module.il.il_infer import il_score_text, il_score_text_with_dir
 
 from ..models import ModerationItem, ModerationDecision
 
@@ -326,18 +326,20 @@ def api_score_multi(request: HttpRequest):
         "sl_oracle":   "/artifacts/sl/oracle",
     }
 
+    IL_MAP = {
+    "il_bakh_iter_005": "/app/artifacts/il/bakh_iter_005/artifacts",
+    "il_sam_iter_005": "/app/artifacts/il/sam_iter_005/artifacts",
+}
+    
     for m in models:
         if m in sl_map:
             # you’ll add this helper (below)
             p = float(score_text_with_dir(sl_map[m], text, max_len=max_len))
             results.append({"model": m, "p_toxic": p})
-        elif m.startswith("il_"):
-            # allow "il_iter_005"
-            iter_name = m.replace("il_", "")  # "iter_005"
-            il_dir = Path(f"/app/artifacts/il/{iter_name}/artifacts")
+        elif m in IL_MAP:
+            il_dir = Path(IL_MAP[m])
             if il_dir.is_dir():
-                set_model_dir(str(il_dir))
-                p = float(il_score_text(text))
+                p = float(il_score_text_with_dir(str(il_dir), text))
                 results.append({"model": m, "p_toxic": p})
             else:
                 results.append({"model": m, "p_toxic": None, "error": f"missing {il_dir}"})

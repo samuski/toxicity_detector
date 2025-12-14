@@ -8,7 +8,9 @@ import joblib
 _lock = threading.Lock()
 _model = None
 _vectorizer = None
+
 _MODEL_DIR = None
+_IL_CACHE = {}  # dir -> (vec, mdl)
 
 def set_model_dir(path: str):
     """Call this from il_scan to choose iter_XXX explicitly."""
@@ -61,3 +63,22 @@ def il_score_text(text: str) -> float:
     # fallback: hard prediction
     y = int(_model.predict(X)[0])
     return float(y)
+
+def il_score_text_with_dir(model_dir: str, text: str) -> float:
+    d = str(Path(model_dir).resolve())
+    if d not in _IL_CACHE:
+        p = Path(d)
+        vec = joblib.load(p / "vectorizer.joblib")
+        mdl = joblib.load(p / "model.joblib")
+        _IL_CACHE[d] = (vec, mdl)
+
+    vec, mdl = _IL_CACHE[d]
+    X = vec.transform([text])
+
+    if hasattr(mdl, "predict_proba"):
+        return float(mdl.predict_proba(X)[0, 1])
+    if hasattr(mdl, "decision_function"):
+        z = float(mdl.decision_function(X)[0])
+        import math
+        return 1.0 / (1.0 + math.exp(-z))
+    return float(mdl.predict(X)[0])
