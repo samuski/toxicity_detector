@@ -10,6 +10,7 @@ from main_module.views.moderation import (
     api_eval,
     api_il_next,
     api_il_decide,
+    api_score_multi
 )
 
 from main_module.views.moderation import api_il_score
@@ -19,7 +20,7 @@ urlpatterns = [
     path("admin/", admin.site.urls),
 
     path("moderation/", moderation_dashboard, name="moderation_dashboard"),
-    path("api/moderation/score", api_score, name="api_score"),
+    path("api/moderation/score_multi", api_score_multi, name="api_score_multi"),
     path("api/moderation/batch", api_batch_score, name="api_batch_score"),
 
     path("api/moderation/eval", api_eval, name="api_eval"),

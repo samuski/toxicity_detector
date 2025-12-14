@@ -152,27 +152,35 @@
       <!-- LEFT COLUMN -->
       <div>
 
-        <!-- Single-text scoring (SL) -->
+        <!-- Single-text scoring (compare) -->
         <div class="card">
-          <h3 class="section-title">Score a single text (SL)</h3>
-          <div class="row">
-            <input id="text" type="text" placeholder="Type text to score…" />
-            <button class="btn" onclick="score()">Score</button>
-          </div>
-          <div id="result" class="muted" style="margin-top: 10px"></div>
-        </div>
+          <h3 class="section-title">Compare models on the same text</h3>
 
-        <!-- Batch scoring CSV -->
-        <div class="card">
-          <h3 class="section-title">Batch score CSV (SL)</h3>
-          <p class="muted">
-            Upload a CSV with a <b>text</b> column. Returns <code>scored.csv</code>
-            with p(toxic) + uncertainty.
-          </p>
-          <div class="row">
-            <input id="csvfile" type="file" accept=".csv" />
-            <button class="btn" onclick="batch()">Upload &amp; Score</button>
+          <div class="row" style="align-items:flex-start;">
+            <input id="text" type="text" placeholder="Type text to score…" />
+
+            <div style="display:flex; flex-direction:column; gap:6px; min-width:240px;">
+              <label><input type="checkbox" class="modelchk" value="sl_baseline" checked> SL baseline</label>
+              <label><input type="checkbox" class="modelchk" value="sl_finetune"> SL finetune</label>
+              <label><input type="checkbox" class="modelchk" value="sl_oracle"> SL oracle</label>
+              <label><input type="checkbox" class="modelchk" value="il_iter_005" checked> IL iter_005</label>
+            </div>
+
+            <button class="btn" onclick="scoreMulti()">Score</button>
           </div>
+
+          <div id="result" class="muted" style="margin-top:10px;"></div>
+
+          <table style="margin-top:10px;">
+            <thead>
+              <tr>
+                <th>Model</th>
+                <th>p(toxic)</th>
+                <th>Pred</th>
+              </tr>
+            </thead>
+            <tbody id="compare_tbl"></tbody>
+          </table>
         </div>
 
         <!-- Human labeling (IL) -->
@@ -255,76 +263,48 @@
 
     <script>
       // ---------- SL single scoring ----------
-      async function score() {
-        const el = document.getElementById("text");
+      async function scoreMulti() {
+        const text = (document.getElementById("text").value || "").trim();
         const res = document.getElementById("result");
-        const payload = { text: el.value, max_len: 256 };
-        if (!payload.text.trim()) {
-          res.textContent = "Enter some text first.";
-          return;
-        }
+        const tbl = document.getElementById("compare_tbl");
+
+        if (!text) { res.textContent = "Enter some text first."; return; }
+
+        const selected = Array.from(document.querySelectorAll(".modelchk"))
+          .filter(x => x.checked)
+          .map(x => x.value);
+
+        if (selected.length === 0) { res.textContent = "Select at least one model."; return; }
+
         res.textContent = "Scoring…";
+        tbl.innerHTML = "";
 
         let r, j;
         try {
-          r = await fetch("/api/moderation/score", {
+          r = await fetch("/api/moderation/score_multi", {
             method: "POST",
-            headers: { "Content-Type": "application/json" },
-            body: JSON.stringify(payload),
+            headers: {"Content-Type":"application/json"},
+            body: JSON.stringify({ text, models: selected, max_len: 256 }),
           });
           j = await r.json();
-        } catch (err) {
-          res.textContent = "Network or parse error: " + err;
+        } catch (e) {
+          res.textContent = "Network or parse error: " + e;
           return;
         }
-        if (!r.ok) {
-          res.textContent = "Error: " + (j.error || r.statusText);
-          return;
-        }
+        if (!r.ok) { res.textContent = "Error: " + (j.error || r.statusText); return; }
 
-        const pred = j.p_toxic >= 0.5 ? "toxic" : "clean";
-        res.innerHTML = `p(toxic)=<b>${j.p_toxic.toFixed(4)}</b> · uncertainty=${j.uncertainty.toFixed(4)} ·
-          <span class="pill ${pred === "toxic" ? "bad" : "ok"}">${pred}</span>`;
+        res.textContent = "";
 
-        // prepend to history table (client-side only)
-        const row = document.createElement("tr");
-        row.innerHTML = `<td>${escapeHtml(payload.text)}</td>
-          <td>${j.p_toxic.toFixed(4)}</td>
-          <td>${j.uncertainty.toFixed(4)}</td>
-          <td><span class="pill ${pred === "toxic" ? "bad" : "ok"}">${pred}</span></td>`;
-        const hist = document.getElementById("history");
-        hist.insertBefore(row, hist.firstChild);
-      }
-
-      // ---------- SL batch scoring ----------
-      async function batch() {
-        const input = document.getElementById("csvfile");
-        if (!input.files.length) {
-          alert("Choose a CSV");
-          return;
+        for (const row of j.results) {
+          const pred = row.p_toxic >= 0.5 ? "toxic" : "clean";
+          const tr = document.createElement("tr");
+          tr.innerHTML = `
+            <td>${escapeHtml(row.model)}</td>
+            <td>${Number(row.p_toxic).toFixed(4)}</td>
+            <td><span class="pill ${pred === "toxic" ? "bad" : "ok"}">${pred}</span></td>
+          `;
+          tbl.appendChild(tr);
         }
-        const fd = new FormData();
-        fd.append("file", input.files[0]);
-
-        let r;
-        try {
-          r = await fetch("/api/moderation/batch", { method: "POST", body: fd });
-        } catch (err) {
-          alert("Network error: " + err);
-          return;
-        }
-        if (!r.ok) {
-          const j = await r.json().catch(() => ({}));
-          alert("Error: " + (j.error || r.statusText));
-          return;
-        }
-        const blob = await r.blob();
-        const url = window.URL.createObjectURL(blob);
-        const a = document.createElement("a");
-        a.href = url;
-        a.download = "scored.csv";
-        a.click();
-        window.URL.revokeObjectURL(url);
       }
 
       // ---------- IL labeling ----------
@@ -442,6 +422,12 @@
 
       // auto-load IL item on page load
       window.addEventListener("load", ilNext);
+
+    function setResult(msg) {
+      const el = document.getElementById("result");
+      if (!el) { console.warn("Missing #result"); return; }
+      el.textContent = msg;
+}
     </script>
   </body>
 </html>

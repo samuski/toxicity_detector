@@ -2,6 +2,7 @@
 import io, csv, json
 from dataclasses import dataclass
 from typing import List
+from pathlib import Path
 
 from django.http import JsonResponse, HttpResponse, HttpRequest
 from django.shortcuts import render
@@ -9,8 +10,9 @@ from django.views.decorators.http import require_GET, require_POST
 from django.views.decorators.csrf import csrf_exempt
 from django.db import transaction
 
-from main_module.sl.sl_infer import reload_model, score_text, estimate_uncertainty
-from main_module.il.il_infer import il_score_text
+from main_module.sl.sl_infer import reload_model, score_text, estimate_uncertainty, score_text_with_dir
+
+from main_module.il.il_infer import il_score_text, set_model_dir
 
 from ..models import ModerationItem, ModerationDecision
 
@@ -299,3 +301,47 @@ def api_il_score(request: HttpRequest):
         return JsonResponse({"p_toxic": p})
     except Exception as e:
         return JsonResponse({"error": str(e)}, status=500)
+
+@csrf_exempt
+@require_POST
+def api_score_multi(request: HttpRequest):
+    try:
+        payload = json.loads(request.body.decode("utf-8"))
+        text = (payload.get("text") or "").strip()
+        models = payload.get("models") or []
+        max_len = int(payload.get("max_len") or 256)
+        if not text:
+            return JsonResponse({"error": "text is required"}, status=400)
+        if not isinstance(models, list) or not models:
+            return JsonResponse({"error": "models must be a non-empty list"}, status=400)
+    except Exception as e:
+        return JsonResponse({"error": str(e)}, status=400)
+
+    results = []
+
+    # --- SL models by tag -> directory ---
+    sl_map = {
+        "sl_baseline": "/artifacts/sl/baseline",
+        "sl_finetune": "/artifacts/sl/finetune",
+        "sl_oracle":   "/artifacts/sl/oracle",
+    }
+
+    for m in models:
+        if m in sl_map:
+            # you’ll add this helper (below)
+            p = float(score_text_with_dir(sl_map[m], text, max_len=max_len))
+            results.append({"model": m, "p_toxic": p})
+        elif m.startswith("il_"):
+            # allow "il_iter_005"
+            iter_name = m.replace("il_", "")  # "iter_005"
+            il_dir = Path(f"/app/artifacts/il/{iter_name}/artifacts")
+            if il_dir.is_dir():
+                set_model_dir(str(il_dir))
+                p = float(il_score_text(text))
+                results.append({"model": m, "p_toxic": p})
+            else:
+                results.append({"model": m, "p_toxic": None, "error": f"missing {il_dir}"})
+        else:
+            results.append({"model": m, "p_toxic": None, "error": "unknown model key"})
+
+    return JsonResponse({"results": results})

@@ -1,6 +1,9 @@
 # backend/app/moderation/sl_infer.py
 import os, threading, torch
 from transformers import AutoTokenizer, AutoModelForSequenceClassification
+from functools import lru_cache
+import numpy as np
+import torch
 
 _model = None
 _tokenizer = None
@@ -68,3 +71,19 @@ if __name__ == "__main__":
         p = score_text(s)
         u = estimate_uncertainty(p)
         print(f"p(toxic)={p:.4f}  uncertainty={u:.4f}")
+
+@lru_cache(maxsize=8)
+def _load_sl_dir(model_dir: str):
+    tok = AutoTokenizer.from_pretrained(model_dir, use_fast=True)
+    mdl = AutoModelForSequenceClassification.from_pretrained(model_dir)
+    mdl.eval()
+    return tok, mdl
+
+@torch.no_grad()
+def score_text_with_dir(model_dir: str, text: str, max_len: int = 256) -> float:
+    tok, mdl = _load_sl_dir(model_dir)
+    enc = tok([text], truncation=True, max_length=max_len, return_tensors="pt")
+    out = mdl(**enc)
+    z = out.logits.view(-1).cpu().numpy()[0]
+    p = 1.0 / (1.0 + np.exp(-z))
+    return float(p)
